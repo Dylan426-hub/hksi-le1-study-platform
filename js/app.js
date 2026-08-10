@@ -1,0 +1,1008 @@
+/* ============================================================
+ * HKSI LE 卷一备考站 · 前端
+ * 题库与全部文案在加密数据包中，解锁后注入 window.HKSI_*。
+ * ============================================================ */
+(function () {
+  'use strict';
+
+  var KEY = 'hksi-le1-v1';
+  var PASS_KEY = 'hksi-le1-pass';
+
+  /* 数据在 initData() 装填 */
+  var META, CHAPTERS, QUESTIONS, NOTES, byId, chMap;
+  var BRAND = { docTitle: '学习平台', homeTitle: '学习平台', homeSub: '', footer: '' };
+
+  function initData() {
+    META = window.HKSI_META || {};
+    if (META.brand) BRAND = META.brand;
+    try { document.title = BRAND.docTitle; } catch (e) { }
+    CHAPTERS = window.HKSI_CHAPTERS || [];
+    QUESTIONS = window.HKSI_QUESTIONS || [];
+    NOTES = window.HKSI_NOTES || [];
+    byId = {}; QUESTIONS.forEach(function (q) { byId[q.id] = q; });
+    chMap = {}; CHAPTERS.forEach(function (c) { chMap[c.n] = c; });
+  }
+  function examCfg() { return (META && META.exam) || { count: 60, minutes: 90, passPct: 70 }; }
+  function srcName(s) { return ((META && META.srcNames) || {})[s] || s; }
+  function availableSources() {
+    var seen = {};
+    QUESTIONS.forEach(function (q) { seen[q.src] = true; });
+    return ['bank', 'past2006', 'sample2023'].filter(function (s) { return seen[s]; });
+  }
+
+  /* ---------- 状态 ---------- */
+  var State = {
+    view: 'home', theme: 'light', lang: 'both',
+    attempts: {},          /* qid -> {c:最近是否对, n:次数, r:对的次数, at:ts} */
+    favorites: [], wrongRemoved: [], examHistory: [],
+    practice: { phase: 'setup', chs: [], srcs: ['bank', 'past2006', 'sample2023'], scope: 'all', order: 'seq', queue: [], idx: 0, sel: null, graded: false, roundRight: 0, roundDone: 0 },
+    exam: { phase: 'setup', mode: 'real', chs: [], count: 60, minutes: 90, timed: true, src: null, queue: [], idx: 0, answers: {}, flags: {}, endAt: 0, gridOpen: false, result: null, showAll: false },
+    note: { ch: 0, open: {}, tab: 'ch' },
+    search: { q: '' },
+    confirmSubmit: false
+  };
+  var timerId = null;
+
+  /* ---------- 工具 ---------- */
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+  function shuffle(a) {
+    a = a.slice();
+    for (var i = a.length - 1; i > 0; i--) {
+      var j = Math.floor(Math.random() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    return a;
+  }
+  function toggleArr(arr, v) { var i = arr.indexOf(v); if (i < 0) arr.push(v); else arr.splice(i, 1); }
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function fmtClock(ms) {
+    if (ms < 0) ms = 0;
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    return (h ? h + ':' : '') + pad2(m) + ':' + pad2(s % 60);
+  }
+  function pct(a, b) { return b ? Math.round(a / b * 100) : 0; }
+  function hasEn(q) { return !!(q.en && q.en.q); }
+
+  /* ---------- 持久化 ---------- */
+  function load() {
+    try {
+      var o = JSON.parse(localStorage.getItem(KEY) || '{}');
+      ['attempts', 'favorites', 'wrongRemoved', 'examHistory', 'theme', 'lang'].forEach(function (k) {
+        if (o[k] != null) State[k] = o[k];
+      });
+      if (o.practice && o.practice.phase === 'run' && o.practice.queue.length) State.practice = o.practice;
+      if (o.exam && (o.exam.phase === 'run' || o.exam.phase === 'result')) State.exam = o.exam;
+    } catch (e) { /* 忽略损坏的本地存储 */ }
+  }
+  function save() {
+    try {
+      localStorage.setItem(KEY, JSON.stringify({
+        attempts: State.attempts, favorites: State.favorites, wrongRemoved: State.wrongRemoved,
+        examHistory: State.examHistory, theme: State.theme, lang: State.lang,
+        practice: State.practice.phase === 'run' ? State.practice : null,
+        exam: (State.exam.phase === 'run' || State.exam.phase === 'result') ? State.exam : null
+      }));
+    } catch (e) { /* 配额满时静默失败 */ }
+  }
+
+  /* ---------- 图标 ---------- */
+  var ICONS = {
+    home: '<path d="M3 10.5 12 3l9 7.5"/><path d="M5.5 9.5V20h13V9.5"/>',
+    book: '<path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H19v18H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H19"/>',
+    star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5.5l3.5 2"/>',
+    x: '<path d="M6 6l12 12M18 6 6 18"/>',
+    chev: '<path d="m6 9 6 6 6-6"/>',
+    back: '<path d="m15 5-7 7 7 7"/>',
+    sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+    moon: '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+    flag: '<path d="M5 21V4M5 4h11l-2 3.5L16 11H5"/>',
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+    target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/>',
+    trash: '<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/>',
+    check: '<path d="m5 12.5 5 5L19 7"/>',
+    doc: '<path d="M6 2h9l4 4v16H6z"/><path d="M14 2v5h5M9 12h6M9 16h6"/>',
+    layers: '<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+    warn: '<path d="M12 3 2.5 20h19z"/><path d="M12 9.5V14M12 16.8v.4"/>',
+    globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    hash: '<path d="M9 3 7 21M17 3l-2 18M4 8.5h17M3 15.5h17"/>'
+  };
+  function ic(name, size, cls) {
+    return '<svg class="' + (cls || '') + '" width="' + (size || 20) + '" height="' + (size || 20) + '" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || '') + '</svg>';
+  }
+
+  /* ---------- 统计 ---------- */
+  function stats() {
+    var done = 0, right = 0;
+    QUESTIONS.forEach(function (q) {
+      var a = State.attempts[q.id];
+      if (a && a.n) { done++; if (a.c) right++; }
+    });
+    var wrongBook = QUESTIONS.filter(function (q) {
+      var a = State.attempts[q.id];
+      return a && a.n && !a.c && State.wrongRemoved.indexOf(q.id) < 0;
+    }).map(function (q) { return q.id; });
+    var chs = CHAPTERS.map(function (c) {
+      var qs = QUESTIONS.filter(function (q) { return q.ch === c.n; });
+      var d = 0, r = 0;
+      qs.forEach(function (q) { var a = State.attempts[q.id]; if (a && a.n) { d++; if (a.c) r++; } });
+      return { n: c.n, zh: c.zh, total: qs.length, done: d, right: r, pct: pct(d, qs.length), acc: pct(r, d) };
+    });
+    return {
+      total: QUESTIONS.length, done: done, right: right,
+      donePct: pct(done, QUESTIONS.length), acc: pct(right, done),
+      wrongBook: wrongBook,
+      favs: State.favorites.filter(function (id) { return byId[id]; }),
+      chs: chs
+    };
+  }
+  function recordAttempt(qid, correct) {
+    var a = State.attempts[qid] || { n: 0, r: 0 };
+    a.n++; if (correct) a.r++;
+    a.c = correct; a.at = Date.now();
+    State.attempts[qid] = a;
+  }
+
+  /* ---------- 小组件 ---------- */
+  function ring(p, size, color, big, small, light) {
+    var sw = Math.max(5, Math.round(size * .1));
+    var r = (size - sw) / 2, c = 2 * Math.PI * r;
+    var track = light ? 'rgba(255,255,255,.25)' : 'var(--bg-soft)';
+    return '<div class="ring" style="width:' + size + 'px;height:' + size + 'px">' +
+      '<svg width="' + size + '" height="' + size + '" viewBox="0 0 ' + size + ' ' + size + '">' +
+      '<circle cx="' + size / 2 + '" cy="' + size / 2 + '" r="' + r + '" fill="none" stroke="' + track + '" stroke-width="' + sw + '"/>' +
+      '<circle cx="' + size / 2 + '" cy="' + size / 2 + '" r="' + r + '" fill="none" stroke="' + color + '" stroke-width="' + sw + '" ' +
+      'stroke-linecap="round" stroke-dasharray="' + c + '" stroke-dashoffset="' + (c * (1 - Math.min(100, p) / 100)) + '" ' +
+      'transform="rotate(-90 ' + size / 2 + ' ' + size / 2 + ')"/></svg>' +
+      '<div class="mid"><div class="v">' + big + '</div><div class="l">' + small + '</div></div></div>';
+  }
+  function chChip(n) { return '<span class="chip brand">第' + n + '章</span>'; }
+  function srcChip(s) { return '<span class="chip">' + esc(srcName(s)) + '</span>'; }
+  function flagChip(q) {
+    if (q.flag === 'fixed') return '<span class="chip warn">答案已依手冊修正</span>';
+    if (q.flag === 'dispute') return '<span class="chip warn">答案存疑</span>';
+    if (q.flag === 'dated') return '<span class="chip warn">規例已更新</span>';
+    return '';
+  }
+  function bar(p, ok) { return '<div class="bar' + (ok ? ' ok' : '') + '"><i style="width:' + p + '%"></i></div>'; }
+
+  /* ---------- 顶栏 / 底栏 ---------- */
+  function topbar(title, sub, backAct, extra) {
+    return '<div class="topbar"><div class="topbar-in">' +
+      (backAct ? '<button class="iconbtn" data-act="' + backAct + '">' + ic('back', 19) + '</button>' : '') +
+      '<div class="t">' + esc(title) + (sub ? '<span class="s">' + esc(sub) + '</span>' : '') + '</div>' +
+      (extra || '') +
+      '<button class="iconbtn" data-act="theme">' + ic(State.theme === 'dark' ? 'sun' : 'moon', 18) + '</button>' +
+      '</div></div>';
+  }
+  function tabbar() {
+    var st = stats();
+    var tabs = [
+      ['home', 'home', '首頁'], ['practice', 'bolt', '刷題'], ['exam', 'clock', '模考'],
+      ['notes', 'book', '要點'], ['wrong', 'x', '錯題' + (st.wrongBook.length ? ' ' + st.wrongBook.length : '')]
+    ];
+    return '<div class="tabbar"><div class="tabbar-in">' + tabs.map(function (t) {
+      return '<button class="tab' + (State.view === t[0] ? ' on' : '') + '" data-act="nav" data-arg="' + t[0] + '">' +
+        ic(t[1], 20) + '<span>' + t[2] + '</span></button>';
+    }).join('') + '</div></div>';
+  }
+
+  /* ============================================================
+     首页
+     ============================================================ */
+  function vHome() {
+    var st = stats(), ec = examCfg();
+    var officialCount = QUESTIONS.filter(function (q) { return q.src === 'past2006' || q.src === 'sample2023'; }).length;
+    var noteCount = NOTES.length;
+    var h = topbar(BRAND.homeTitle, BRAND.homeSub, null,
+      '<button class="iconbtn" data-act="nav" data-arg="search">' + ic('search', 18) + '</button>');
+    h += '<div class="wrap">';
+    h += '<div class="hero">' +
+      ring(st.donePct, 96, '#fff', st.donePct + '%', '已刷', true) +
+      '<div style="flex:1;min-width:0"><div class="hero-t">HKSI LE 試卷一</div>' +
+      '<div class="hero-s">' + ec.count + ' 題 · ' + ec.minutes + ' 分鐘 · ' + ec.passPct + '% 合格</div>' +
+      '<div class="hero-facts">' +
+      '<div class="hf"><b>' + st.done + '</b>已做 / ' + st.total + '</div>' +
+      '<div class="hf"><b>' + st.acc + '%</b>正確率</div>' +
+      '<div class="hf"><b>' + st.wrongBook.length + '</b>錯題待清</div>' +
+      '</div></div></div>';
+
+    h += '<div class="navgrid">' + [
+      ['practice', 'bolt', '刷題', st.total + ' 題', 0],
+      ['exam', 'clock', '模擬考', '全真 ' + ec.count + '/' + ec.minutes + '′', 0],
+      ['official', 'doc', '官方卷', officialCount ? officialCount + ' 題' : '暫未提供', 0],
+      ['notes', 'book', '章節要點', noteCount ? noteCount + ' 章' : '暫未提供', 0],
+      ['wrong', 'x', '錯題本', '待清 ' + st.wrongBook.length, st.wrongBook.length],
+      ['favs', 'star', '收藏', st.favs.length + ' 題', 0]
+    ].map(function (n) {
+      return '<button class="navitem" data-act="nav" data-arg="' + n[0] + '">' + ic(n[1], 22) +
+        '<div class="nt">' + n[2] + '</div><div class="ns">' + n[3] + '</div></button>';
+    }).join('') + '</div>';
+
+    h += '<div class="card"><div class="card-t">' + ic('layers', 18) + '章節掌握</div>';
+    h += st.chs.map(function (c) {
+      return '<div class="chrow" data-act="ch-practice" data-arg="' + c.n + '">' +
+        '<div class="cn">' + c.n + '</div>' +
+        '<div class="cmain"><div class="ct">' + esc(c.zh) + '</div><div class="cbar">' + bar(c.pct) + '</div></div>' +
+        '<div class="cnum">' + c.done + '/' + c.total + (c.done ? ' · ' + c.acc + '%' : '') + '</div></div>';
+    }).join('') + '</div>';
+
+    if (State.examHistory.length) {
+      h += '<div class="card"><div class="card-t">' + ic('clock', 18) + '最近模考</div>';
+      h += State.examHistory.slice(-5).reverse().map(function (r) {
+        var d = new Date(r.at);
+        return '<div class="result-row"><div class="rn">' + esc(r.label) + ' <span class="faint">' +
+          (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + '</span></div>' +
+          '<div class="rv"><span class="chip ' + (r.pass ? 'ok' : 'bad') + '">' + r.pct + '%</span></div></div>';
+      }).join('') + '</div>';
+    }
+    h += '<div class="faint" style="text-align:center;margin-top:22px;white-space:pre-wrap">題庫：' +
+      esc(srcName('bank')) + ' · AI 解析僅供參考\n非官方學習工具 · 內容僅供個人備考使用</div>';
+    h += '</div>' + tabbar();
+    return h;
+  }
+
+  /* ============================================================
+     题目渲染（刷题 / 模考 / 复盘共用）
+     ============================================================ */
+  function stemHTML(q) {
+    var h = esc(q.q);
+    if (hasEn(q) && State.lang !== 'zh') {
+      if (State.lang === 'en') h = esc(q.en.q);
+      else h += '<span class="en">' + esc(q.en.q) + '</span>';
+    }
+    return h;
+  }
+  function optHTML(q, k) {
+    var zh = q[k], en = hasEn(q) && q.en[k];
+    var body;
+    if (en && State.lang === 'en') body = esc(en);
+    else {
+      body = esc(zh);
+      if (en && State.lang === 'both') body += '<span class="en">' + esc(en) + '</span>';
+    }
+    return body;
+  }
+  /* graded: null=未判, 否则 {sel} */
+  function qCard(q, sel, graded, opts) {
+    opts = opts || {};
+    var fav = State.favorites.indexOf(q.id) >= 0;
+    var h = '<div class="card">';
+    h += '<div class="qmeta">' + chChip(q.ch) + srcChip(q.src) +
+      (q.code ? '<span class="chip">' + esc(q.code) + '</span>' : '') +
+      (graded ? flagChip(q) : '') +
+      (hasEn(q) ? '<button class="chip brand" data-act="lang" style="border:0;cursor:pointer;font-family:inherit">' +
+        (State.lang === 'zh' ? '中' : State.lang === 'en' ? 'EN' : '中+EN') + '</button>' : '') +
+      '<span style="flex:1"></span>' +
+      '<button class="iconbtn' + (fav ? ' on' : '') + '" style="width:32px;height:32px" data-act="fav" data-arg="' + q.id + '">' + ic('star', 16) + '</button>' +
+      '</div>';
+    h += '<div class="qstem">' + stemHTML(q) + '</div>';
+    h += '<div class="opts">' + ['A', 'B', 'C', 'D'].map(function (k) {
+      var cls = 'opt';
+      if (graded) {
+        if (k === q.ans) cls += ' right';
+        else if (sel === k) cls += ' wrong';
+      } else if (sel === k) cls += ' sel';
+      return '<button class="' + cls + '" data-act="' + (opts.answerAct || 'p-answer') + '" data-arg="' + k + '" ' +
+        (graded && opts.lockGraded ? 'disabled' : '') + '>' +
+        '<span class="k">' + k + '</span><span style="flex:1">' + optHTML(q, k) + '</span></button>';
+    }).join('') + '</div>';
+    if (graded && opts.showExplain) {
+      var warn = !!q.flag;
+      h += '<div class="explain' + (warn ? ' warnbox' : '') + '">' +
+        '<div class="ex-t">' + (warn ? ic('warn', 15) : ic('check', 15)) +
+        (sel === q.ans ? '答對了' : sel ? '答錯了 · 正確答案 ' + q.ans : '正確答案 ' + q.ans) + '</div>' +
+        (q.note ? '<div style="margin-bottom:6px"><b>' + esc(q.note) + '</b></div>' : '') +
+        (q.ex ? '<div>' + esc(q.ex) + '</div>' : '<div class="faint">此題暫無解析</div>') +
+        '<div class="ref">' + (q.ref ? esc(q.ref) + ' · ' : '') + 'AI 解析 · 依官方溫習手冊 3.5 版生成，僅供參考</div>' +
+        '</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* ============================================================
+     刷题
+     ============================================================ */
+  function practicePool() {
+    var p = State.practice, st = stats();
+    return QUESTIONS.filter(function (q) {
+      if (p.chs.length && p.chs.indexOf(q.ch) < 0) return false;
+      if (p.srcs.length && p.srcs.indexOf(q.src) < 0) return false;
+      var a = State.attempts[q.id];
+      if (p.scope === 'new' && a && a.n) return false;
+      if (p.scope === 'wrong' && st.wrongBook.indexOf(q.id) < 0) return false;
+      if (p.scope === 'fav' && State.favorites.indexOf(q.id) < 0) return false;
+      return true;
+    }).map(function (q) { return q.id; });
+  }
+  function vPracticeSetup() {
+    var p = State.practice;
+    var pool = practicePool();
+    var h = topbar('刷題', null, 'home2');
+    h += '<div class="wrap">';
+    h += '<div class="card"><div class="card-t">章節</div><div class="pickgrid">' +
+      '<button class="pick' + (!p.chs.length ? ' on' : '') + '" data-act="p-ch" data-arg="0">全部</button>' +
+      CHAPTERS.map(function (c) {
+        return '<button class="pick' + (p.chs.indexOf(c.n) >= 0 ? ' on' : '') + '" data-act="p-ch" data-arg="' + c.n + '">' +
+          c.n + '. ' + esc(c.zh.length > 9 ? c.zh.slice(0, 8) + '…' : c.zh) + '</button>';
+      }).join('') + '</div></div>';
+    h += '<div class="card"><div class="card-t">來源</div><div class="pickgrid">' +
+      availableSources().map(function (s) {
+        return '<button class="pick' + (p.srcs.indexOf(s) >= 0 ? ' on' : '') + '" data-act="p-src" data-arg="' + s + '">' + esc(srcName(s)) + '</button>';
+      }).join('') + '</div></div>';
+    h += '<div class="card"><div class="card-t">範圍與順序</div>' +
+      '<div class="seg" style="margin-bottom:10px">' + [['all', '全部'], ['new', '只刷未做'], ['wrong', '錯題'], ['fav', '收藏']].map(function (s) {
+        return '<button class="' + (p.scope === s[0] ? 'on' : '') + '" data-act="p-scope" data-arg="' + s[0] + '">' + s[1] + '</button>';
+      }).join('') + '</div>' +
+      '<div class="seg">' + [['seq', '順序'], ['rnd', '隨機']].map(function (s) {
+        return '<button class="' + (p.order === s[0] ? 'on' : '') + '" data-act="p-order" data-arg="' + s[0] + '">' + s[1] + '</button>';
+      }).join('') + '</div></div>';
+    h += '<button class="btn brand block" style="margin-top:16px" data-act="p-start" ' + (pool.length ? '' : 'disabled') + '>開始（' + pool.length + ' 題）</button>';
+    h += '</div>' + tabbar();
+    return h;
+  }
+  function startPractice(queue, idx) {
+    var p = State.practice;
+    p.phase = 'run'; p.queue = queue; p.idx = idx || 0;
+    p.sel = null; p.graded = false; p.roundRight = 0; p.roundDone = 0;
+    State.view = 'practice'; save(); render();
+  }
+  function vPracticeRun() {
+    var p = State.practice;
+    if (p.idx >= p.queue.length) return vPracticeDone();
+    var q = byId[p.queue[p.idx]];
+    if (!q) { p.idx++; return vPracticeRun(); }
+    var h = topbar('刷題', (p.idx + 1) + ' / ' + p.queue.length, 'p-quit');
+    h += '<div class="wrap">';
+    h += '<div style="margin-top:14px">' + bar(pct(p.idx, p.queue.length)) + '</div>';
+    h += qCard(q, p.sel, p.graded, { showExplain: true, lockGraded: true, answerAct: 'p-answer' });
+    h += '<div class="qnav">' +
+      '<button class="btn" data-act="p-prev" ' + (p.idx ? '' : 'disabled') + '>上一題</button>' +
+      '<div class="pos">' + (p.roundDone ? '本輪 ' + p.roundRight + '/' + p.roundDone : '') + '</div>' +
+      '<button class="btn ' + (p.graded ? 'brand' : '') + '" data-act="p-next">' + (p.graded ? '下一題' : '跳過') + '</button>' +
+      '</div>';
+    h += '<div class="faint" style="text-align:center;margin-top:10px">鍵盤：A–D / 1–4 作答，←→ 切換</div>';
+    h += '</div>';
+    return h;
+  }
+  function vPracticeDone() {
+    var p = State.practice;
+    var h = topbar('本輪完成', null, 'p-quit');
+    h += '<div class="wrap"><div class="card result-hero">' +
+      ring(pct(p.roundRight, p.roundDone || 1), 110, 'var(--brand)', p.roundRight + '/' + (p.roundDone || 0), '答對') +
+      '<div class="verdict">' + (p.roundDone ? '正確率 ' + pct(p.roundRight, p.roundDone) + '%' : '本輪未作答') + '</div>' +
+      '</div>' +
+      '<button class="btn brand block" style="margin-top:14px" data-act="p-quit">返回</button>' +
+      '</div>';
+    return h;
+  }
+
+  /* ============================================================
+     模拟考（含官方卷）
+     ============================================================ */
+  /* 全真模式：按题库各章占比（最大余额法）抽样 */
+  function blueprintSample(count, chs) {
+    var pool = QUESTIONS.filter(function (q) {
+      return q.src === 'bank' && (!chs.length || chs.indexOf(q.ch) >= 0);
+    });
+    var byCh = {};
+    pool.forEach(function (q) { (byCh[q.ch] = byCh[q.ch] || []).push(q); });
+    var keys = Object.keys(byCh);
+    var total = pool.length;
+    count = Math.min(count, total);
+    if (!count) return [];
+    var quota = {}, rem = [];
+    var used = 0;
+    keys.forEach(function (ch) {
+      var exact = count * byCh[ch].length / total;
+      quota[ch] = Math.floor(exact); used += quota[ch];
+      rem.push([ch, exact - quota[ch]]);
+    });
+    rem.sort(function (a, b) { return b[1] - a[1]; });
+    for (var i = 0; used < count && i < rem.length; i++, used++) quota[rem[i][0]]++;
+    var out = [];
+    keys.forEach(function (ch) {
+      out = out.concat(shuffle(byCh[ch]).slice(0, quota[ch]));
+    });
+    return shuffle(out).map(function (q) { return q.id; });
+  }
+  function vExamSetup() {
+    var e = State.exam, ec = examCfg();
+    var customAvailable = QUESTIONS.filter(function (q) {
+      return q.src === 'bank' && (!e.chs.length || e.chs.indexOf(q.ch) >= 0);
+    }).length;
+    var h = topbar('模擬考', null, 'home2');
+    h += '<div class="wrap">';
+    h += '<div class="card"><div class="card-t">' + ic('target', 18) + '模式</div>' +
+      '<div class="seg">' + [['real', '全真 ' + ec.count + '題'], ['quick', '快速 30題'], ['custom', '自訂']].map(function (s) {
+        return '<button class="' + (e.mode === s[0] ? 'on' : '') + '" data-act="e-mode" data-arg="' + s[0] + '">' + s[1] + '</button>';
+      }).join('') + '</div>' +
+      '<div class="muted" style="margin-top:10px">' +
+      (e.mode === 'real' ? '完全比照正式考試：' + ec.count + ' 題 · ' + ec.minutes + ' 分鐘 · ' + ec.passPct + '% 合格，按題庫章節比例抽題。'
+        : e.mode === 'quick' ? '30 題 · 45 分鐘，章節比例抽題，快速自測。'
+          : '自選章節，題數與時間按比例縮放。') + '</div>';
+    if (e.mode === 'custom') {
+      h += '<div class="pickgrid" style="margin-top:12px">' +
+        '<button class="pick' + (!e.chs.length ? ' on' : '') + '" data-act="e-ch" data-arg="0">全部章節</button>' +
+        CHAPTERS.map(function (c) {
+          return '<button class="pick' + (e.chs.indexOf(c.n) >= 0 ? ' on' : '') + '" data-act="e-ch" data-arg="' + c.n + '">' + c.n + '</button>';
+        }).join('') + '</div>' +
+        '<div class="seg" style="margin-top:12px">' + [20, 30, 60].map(function (n) {
+          return '<button class="' + (e.count === n ? 'on' : '') + '" data-act="e-count" data-arg="' + n + '">' + n + ' 題</button>';
+        }).join('') + '</div>' +
+        '<div class="muted" style="margin-top:10px">目前範圍可用 ' + customAvailable + ' 題；選擇超出時會按實際題量出卷。</div>';
+    }
+    h += '</div>';
+    h += '<button class="btn brand block" style="margin-top:16px" data-act="e-start">開始模擬考</button>';
+    if (State.examHistory.length) {
+      h += '<div class="card"><div class="card-t">歷史成績</div>' +
+        State.examHistory.slice(-8).reverse().map(function (r) {
+          var d = new Date(r.at);
+          return '<div class="result-row"><div class="rn">' + esc(r.label) + ' <span class="faint">' + (d.getMonth() + 1) + '/' + d.getDate() + '</span></div>' +
+            '<div class="rv">' + r.right + '/' + r.count + ' · <b style="color:var(--' + (r.pass ? 'ok' : 'bad') + ')">' + r.pct + '%</b></div></div>';
+        }).join('') + '</div>';
+    }
+    h += '</div>' + tabbar();
+    return h;
+  }
+  function startExam(mode, queue, minutes, label, src) {
+    var e = State.exam;
+    e.phase = 'run'; e.mode = mode; e.src = src || null;
+    e.queue = queue; e.idx = 0; e.answers = {}; e.flags = {};
+    e.timed = minutes > 0;
+    e.minutes = minutes || 0;
+    e.endAt = minutes > 0 ? Date.now() + minutes * 60000 : 0;
+    e.gridOpen = false; e.result = null; e.label = label; e.showAll = false;
+    State.confirmSubmit = false;
+    State.view = 'exam'; save(); render();
+  }
+  function submitExam(auto) {
+    var e = State.exam, ec = examCfg();
+    stopTimer();
+    var right = 0, byCh = {};
+    e.queue.forEach(function (id) {
+      var q = byId[id]; if (!q) return;
+      var c = byCh[q.ch] = byCh[q.ch] || { total: 0, right: 0 };
+      c.total++;
+      var ok = e.answers[id] === q.ans;
+      if (ok) { right++; c.right++; }
+      recordAttempt(id, ok);
+    });
+    var p = pct(right, e.queue.length);
+    e.result = {
+      right: right, count: e.queue.length, pct: p, pass: p >= ec.passPct, auto: !!auto,
+      byCh: Object.keys(byCh).sort(function (a, b) { return a - b; }).map(function (ch) {
+        return { ch: +ch, total: byCh[ch].total, right: byCh[ch].right };
+      })
+    };
+    e.phase = 'result';
+    State.examHistory.push({ at: Date.now(), label: e.label, right: right, count: e.queue.length, pct: p, pass: p >= ec.passPct });
+    if (State.examHistory.length > 30) State.examHistory = State.examHistory.slice(-30);
+    save(); render();
+  }
+  function vExamRun() {
+    var e = State.exam;
+    var q = byId[e.queue[e.idx]];
+    var answered = Object.keys(e.answers).length;
+    var h = topbar(e.label || '模擬考', (e.idx + 1) + ' / ' + e.queue.length, 'e-quit',
+      '<button class="iconbtn' + (e.flags[q.id] ? ' on' : '') + '" data-act="e-flag">' + ic('flag', 17) + '</button>' +
+      '<button class="iconbtn" data-act="e-grid">' + ic('grid', 17) + '</button>');
+    h += '<div class="wrap">';
+    h += '<div class="exambar">' +
+      (e.timed ? '<div class="clock" id="clock">--:--</div>' : '<div class="chip">不計時</div>') +
+      '<div class="muted" style="flex:1">已答 ' + answered + '/' + e.queue.length + '</div>' +
+      '<button class="btn sm brand" data-act="e-submit">交卷</button></div>';
+    if (State.confirmSubmit) {
+      h += '<div class="card" style="border-color:var(--warn)"><b>還有 ' + (e.queue.length - answered) + ' 題未作答</b>' +
+        '<div class="muted" style="margin:6px 0 12px">確定要交卷嗎？未答題目按錯誤計分。</div>' +
+        '<div style="display:flex;gap:10px"><button class="btn" data-act="e-submit-cancel" style="flex:1">繼續作答</button>' +
+        '<button class="btn danger" data-act="e-submit-force" style="flex:1">確定交卷</button></div></div>';
+    }
+    if (e.gridOpen) {
+      h += '<div class="card"><div class="gridwrap">' + e.queue.map(function (id, i) {
+        var cls = 'gcell';
+        if (e.answers[id]) cls += ' done';
+        if (e.flags[id]) cls += ' flag';
+        if (i === e.idx) cls += ' cur';
+        return '<button class="' + cls + '" data-act="e-jump" data-arg="' + i + '">' + (i + 1) + '</button>';
+      }).join('') + '</div></div>';
+    }
+    h += qCard(q, e.answers[q.id] || null, false, { answerAct: 'e-answer' });
+    h += '<div class="qnav">' +
+      '<button class="btn" data-act="e-prev" ' + (e.idx ? '' : 'disabled') + '>上一題</button>' +
+      '<div class="pos">' + (e.idx + 1) + '/' + e.queue.length + '</div>' +
+      '<button class="btn brand" data-act="e-next" ' + (e.idx < e.queue.length - 1 ? '' : 'disabled') + '>下一題</button>' +
+      '</div>';
+    h += '</div>';
+    return h;
+  }
+  function vExamResult() {
+    var e = State.exam, r = e.result, ec = examCfg();
+    var h = topbar('成績單', e.label, 'e-quit');
+    h += '<div class="wrap">';
+    h += '<div class="card result-hero">' +
+      ring(r.pct, 130, r.pass ? 'var(--ok)' : 'var(--bad)', r.pct + '%', r.right + '/' + r.count) +
+      '<div class="verdict ' + (r.pass ? 'pass' : 'fail') + '">' + (r.pass ? '合格 ✓' : '未達 ' + ec.passPct + '%') + '</div>' +
+      (r.auto ? '<div class="faint" style="margin-top:4px">時間到自動交卷</div>' : '') +
+      '</div>';
+    h += '<div class="card"><div class="card-t">章節表現</div>' + r.byCh.map(function (c) {
+      var cm = chMap[c.ch] || { zh: '' };
+      var a = pct(c.right, c.total);
+      return '<div class="result-row"><div class="rn">第' + c.ch + '章 ' + esc(cm.zh) + '</div>' +
+        '<div class="rv">' + c.right + '/' + c.total + ' · <b style="color:var(--' + (a >= ec.passPct ? 'ok' : 'bad') + ')">' + a + '%</b></div></div>';
+    }).join('') + '</div>';
+    var wrongs = e.queue.filter(function (id) { var q = byId[id]; return q && e.answers[id] !== q.ans; });
+    h += '<div class="card"><div class="card-t">' + ic('x', 17) + '複盤（' + (e.showAll ? '全部 ' + e.queue.length : '錯題 ' + wrongs.length) + '）' +
+      '<span style="flex:1"></span><button class="btn sm" data-act="e-showall">' + (e.showAll ? '只看錯題' : '看全部') + '</button></div></div>';
+    (e.showAll ? e.queue : wrongs).forEach(function (id) {
+      var q = byId[id]; if (!q) return;
+      h += qCard(q, e.answers[id] || null, true, { showExplain: true, lockGraded: true, answerAct: 'noop' });
+    });
+    h += '<button class="btn brand block" style="margin-top:14px" data-act="e-quit">完成</button>';
+    h += '</div>';
+    return h;
+  }
+
+  /* ---------- 官方卷 ---------- */
+  function vOfficial() {
+    var h = topbar('官方練習卷', null, 'home2');
+    h += '<div class="wrap">';
+    var rendered = 0;
+    [['past2006', '歷屆試題（2006年12月）', '繁體中文 · 附官方答案', '真實歷屆考卷，部分規例其後有修訂，解析中已標註。'],
+     ['sample2023', '官方樣本試卷（2023）', '中英對照 · 附官方答案', '香港證券及投資學會官方 Sample Practice Test，最貼近現行考試。']]
+      .forEach(function (s) {
+        var qs = QUESTIONS.filter(function (q) { return q.src === s[0]; });
+        if (!qs.length) return;
+        rendered++;
+        h += '<div class="card"><div class="card-t">' + ic('doc', 18) + esc(s[1]) + '</div>' +
+          '<div class="muted">' + esc(s[2]) + ' · ' + qs.length + ' 題</div>' +
+          '<div class="faint" style="margin:6px 0 12px">' + esc(s[3]) + '</div>' +
+          '<div style="display:flex;gap:10px">' +
+          '<button class="btn brand" style="flex:1" data-act="o-start" data-arg="' + s[0] + ':timed">計時模考</button>' +
+          '<button class="btn" style="flex:1" data-act="o-start" data-arg="' + s[0] + ':free">不計時</button>' +
+          '</div></div>';
+      });
+    if (!rendered) h += '<div class="empty">' + ic('doc', 34) + '目前版本尚未提供官方練習卷</div>';
+    h += '</div>' + tabbar();
+    return h;
+  }
+
+  /* ============================================================
+     章节要点
+     ============================================================ */
+  function vNotes() {
+    var nv = State.note;
+    var h = topbar('章節要點', null, 'home2');
+    h += '<div class="wrap">';
+    if (!NOTES.length) {
+      h += '<div class="empty">' + ic('book', 34) + '目前版本尚未提供章節要點</div></div>' + tabbar();
+      return h;
+    }
+    h += '<div class="seg" style="margin-top:14px">' +
+      '<button class="' + (nv.tab === 'ch' ? 'on' : '') + '" data-act="n-tab" data-arg="ch">章節</button>' +
+      '<button class="' + (nv.tab === 'num' ? 'on' : '') + '" data-act="n-tab" data-arg="num">關鍵數字</button></div>';
+    if (nv.tab === 'ch') {
+      h += '<div class="card">' + CHAPTERS.map(function (c) {
+        var note = NOTES.filter(function (n) { return n.ch === c.n; })[0];
+        var np = note ? note.sections.reduce(function (s, x) { return s + x.points.length; }, 0) : 0;
+        return '<div class="chrow" data-act="n-open" data-arg="' + c.n + '">' +
+          '<div class="cn">' + c.n + '</div>' +
+          '<div class="cmain"><div class="ct">' + esc(c.zh) + '</div>' +
+          '<div class="faint">' + esc(c.en || '') + '</div></div>' +
+          '<div class="cnum">' + (np ? np + ' 條' : '—') + '</div></div>';
+      }).join('') + '</div>';
+    } else {
+      var kn = [];
+      NOTES.forEach(function (n) {
+        (n.keyNumbers || []).forEach(function (k) { kn.push({ ch: n.ch, label: k.label, value: k.value }); });
+      });
+      h += '<div class="card"><div class="muted" style="margin-bottom:8px">全部章節的數字類考點（期限 / 百分比 / 金額 / 罰則），考前最後過一遍。</div>' +
+        '<table class="numtable">' + kn.map(function (k) {
+          return '<tr><td><span class="chip brand" style="margin-right:6px">' + k.ch + '</span>' + esc(k.label) + '</td><td>' + esc(k.value) + '</td></tr>';
+        }).join('') + '</table></div>';
+    }
+    h += '</div>' + tabbar();
+    return h;
+  }
+  function vNoteDetail() {
+    var nv = State.note;
+    var c = chMap[nv.ch] || {};
+    var note = NOTES.filter(function (n) { return n.ch === nv.ch; })[0];
+    var h = topbar('第' + nv.ch + '章', c.zh, 'n-back');
+    h += '<div class="wrap">';
+    if (!note) {
+      h += '<div class="empty">' + ic('book', 34) + '本章要點暫未生成</div>';
+    } else {
+      h += '<button class="btn brand block" style="margin-top:14px" data-act="ch-practice" data-arg="' + nv.ch + '">刷本章題目</button>';
+      note.sections.forEach(function (s, i) {
+        var open = nv.open[i] !== false;
+        h += '<div class="notesec' + (open ? ' open' : '') + '"><button data-act="n-sec" data-arg="' + i + '">' +
+          '<span style="flex:1">' + esc(s.heading) + '</span><span class="faint">' + s.points.length + '</span>' + ic('chev', 16) + '</button>' +
+          '<div class="body">' + s.points.map(function (p) {
+            return '<div class="pt' + (p.src === '手冊' ? ' src-m' : '') + '">' + esc(p.t) + '</div>';
+          }).join('') + '</div></div>';
+      });
+      if (note.keyNumbers && note.keyNumbers.length) {
+        h += '<div class="card"><div class="card-t">' + ic('hash', 17) + '關鍵數字</div><table class="numtable">' +
+          note.keyNumbers.map(function (k) { return '<tr><td>' + esc(k.label) + '</td><td>' + esc(k.value) + '</td></tr>'; }).join('') +
+          '</table></div>';
+      }
+      if (note.examTraps && note.examTraps.length) {
+        h += '<div class="card"><div class="card-t">' + ic('warn', 17) + '易錯陷阱</div>' +
+          note.examTraps.map(function (t) { return '<div class="trap">' + ic('warn', 14) + '<span>' + esc(t) + '</span></div>'; }).join('') + '</div>';
+      }
+      h += '<div class="faint" style="text-align:center;margin-top:14px">藍點=課件要點 · 金點=溫習手冊3.5補充 · AI 整理僅供參考</div>';
+    }
+    h += '</div>';
+    return h;
+  }
+
+  /* ============================================================
+     错题本 / 收藏 / 搜索
+     ============================================================ */
+  function qListRows(ids, removeAct) {
+    return ids.map(function (id) {
+      var q = byId[id]; if (!q) return '';
+      var a = State.attempts[id];
+      return '<div class="qlrow" data-act="l-open" data-arg="' + id + '">' +
+        '<div class="qlt">' + esc(q.q.split('\n')[0]) + '</div>' +
+        '<div class="qlm">' + chChip(q.ch) + srcChip(q.src) +
+        (a && a.n ? '<span class="chip ' + (a.c ? 'ok' : 'bad') + '">' + (a.c ? '已答對' : '答錯 ' + (a.n - a.r) + ' 次') + '</span>' : '') +
+        '<span style="flex:1"></span>' +
+        (removeAct ? '<button class="iconbtn" style="width:30px;height:30px" data-act="' + removeAct + '" data-arg="' + id + '">' + ic('trash', 14) + '</button>' : '') +
+        '</div></div>';
+    }).join('');
+  }
+  function vWrong() {
+    var st = stats();
+    var h = topbar('錯題本', st.wrongBook.length + ' 題', 'home2');
+    h += '<div class="wrap">';
+    if (!st.wrongBook.length) {
+      h += '<div class="empty">' + ic('check', 34) + '錯題全部清掉了，漂亮</div>';
+    } else {
+      h += '<button class="btn brand block" style="margin-top:14px" data-act="w-redo">重刷全部錯題</button>';
+      h += '<div class="card">' + qListRows(st.wrongBook, 'w-remove') + '</div>';
+      h += '<div class="faint" style="text-align:center;margin-top:10px">重新答對後自動移出錯題本</div>';
+    }
+    h += '</div>' + tabbar();
+    return h;
+  }
+  function vFavs() {
+    var st = stats();
+    var h = topbar('收藏', st.favs.length + ' 題', 'home2');
+    h += '<div class="wrap">';
+    if (!st.favs.length) h += '<div class="empty">' + ic('star', 34) + '刷題時點星號收藏重點題</div>';
+    else {
+      h += '<button class="btn brand block" style="margin-top:14px" data-act="f-redo">刷收藏題</button>';
+      h += '<div class="card">' + qListRows(st.favs, 'fav') + '</div>';
+    }
+    h += '</div>' + tabbar();
+    return h;
+  }
+  function searchHits() {
+    var kw = State.search.q.trim().toLowerCase();
+    if (kw.length < 2) return [];
+    return QUESTIONS.filter(function (q) {
+      var t = (q.q + ' ' + q.A + ' ' + q.B + ' ' + q.C + ' ' + q.D + ' ' + (q.ex || '') + (hasEn(q) ? ' ' + q.en.q : '')).toLowerCase();
+      return t.indexOf(kw) >= 0;
+    }).slice(0, 60).map(function (q) { return q.id; });
+  }
+  function vSearch() {
+    var h = topbar('搜索', null, 'home2');
+    h += '<div class="wrap">';
+    h += '<div class="searchbox"><input id="searchin" placeholder="搜題幹 / 選項 / 解析（≥2字）" value="' + esc(State.search.q) + '"></div>';
+    var hits = searchHits();
+    if (State.search.q.trim().length >= 2) {
+      h += '<div class="card">' + (hits.length ? qListRows(hits) : '<div class="empty">沒有匹配的題目</div>') + '</div>';
+    }
+    h += '</div>' + tabbar();
+    return h;
+  }
+
+  /* ============================================================
+     渲染 & 计时
+     ============================================================ */
+  function stopTimer() { if (timerId) { clearInterval(timerId); timerId = null; } }
+  function tickExam() {
+    var e = State.exam;
+    if (e.phase !== 'run' || !e.timed) { stopTimer(); return; }
+    var left = e.endAt - Date.now();
+    if (left <= 0) { submitExam(true); return; }
+    var el = document.getElementById('clock');
+    if (el) {
+      el.textContent = fmtClock(left);
+      el.className = 'clock' + (left < 5 * 60000 ? ' low' : '');
+    }
+  }
+  function render() {
+    var el = document.getElementById('app');
+    document.documentElement.setAttribute('data-theme', State.theme);
+    stopTimer();
+    var v = State.view, h = '';
+    if (v === 'home') h = vHome();
+    else if (v === 'practice') h = State.practice.phase === 'run' ? vPracticeRun() : vPracticeSetup();
+    else if (v === 'exam') h = State.exam.phase === 'run' ? vExamRun() : State.exam.phase === 'result' ? vExamResult() : vExamSetup();
+    else if (v === 'official') h = vOfficial();
+    else if (v === 'notes') h = vNotes();
+    else if (v === 'note') h = vNoteDetail();
+    else if (v === 'wrong') h = vWrong();
+    else if (v === 'favs') h = vFavs();
+    else if (v === 'search') h = vSearch();
+    el.innerHTML = h;
+    if (State.view === 'exam' && State.exam.phase === 'run' && State.exam.timed) {
+      tickExam(); timerId = setInterval(tickExam, 500);
+    }
+    if (State.view === 'search') {
+      var si = document.getElementById('searchin');
+      if (si) { si.focus(); si.setSelectionRange(si.value.length, si.value.length); }
+    }
+    window.scrollTo(0, 0);
+  }
+
+  /* ============================================================
+     事件
+     ============================================================ */
+  function answerPractice(k) {
+    var p = State.practice;
+    if (p.graded) return;
+    var q = byId[p.queue[p.idx]];
+    p.sel = k; p.graded = true;
+    p.roundDone++;
+    var ok = k === q.ans;
+    if (ok) p.roundRight++;
+    recordAttempt(q.id, ok);
+    save(); render();
+    var card = document.querySelector('.explain');
+    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function handleAct(act, arg, target) {
+    var p = State.practice, e = State.exam;
+    switch (act) {
+      case 'nav':
+        if (arg === 'practice' && p.phase !== 'run') { p.phase = 'setup'; }
+        if (arg === 'exam' && e.phase === 'result') { /* 保留成绩单 */ }
+        State.view = arg; render(); break;
+      case 'home2': State.view = 'home'; render(); break;
+      case 'theme': State.theme = State.theme === 'dark' ? 'light' : 'dark'; save(); render(); break;
+      case 'lang':
+        State.lang = State.lang === 'both' ? 'zh' : State.lang === 'zh' ? 'en' : 'both';
+        save(); render(); break;
+      case 'fav': toggleArr(State.favorites, arg); save(); render(); break;
+
+      /* 刷题 */
+      case 'p-ch':
+        if (arg === '0') p.chs = [];
+        else toggleArr(p.chs, +arg);
+        render(); break;
+      case 'p-src': toggleArr(p.srcs, arg); if (!p.srcs.length) p.srcs = ['bank']; render(); break;
+      case 'p-scope': p.scope = arg; render(); break;
+      case 'p-order': p.order = arg; render(); break;
+      case 'p-start': {
+        var pool = practicePool();
+        startPractice(p.order === 'rnd' ? shuffle(pool) : pool);
+        break;
+      }
+      case 'p-answer': answerPractice(arg); break;
+      case 'p-next':
+        p.idx++; p.sel = null; p.graded = false; save(); render(); break;
+      case 'p-prev':
+        if (p.idx) { p.idx--; p.sel = null; p.graded = false; save(); render(); } break;
+      case 'p-quit': p.phase = 'setup'; p.queue = []; State.view = 'home'; save(); render(); break;
+      case 'ch-practice':
+        p.chs = [+arg]; p.srcs = ['bank', 'past2006', 'sample2023']; p.scope = 'all'; p.phase = 'setup';
+        State.view = 'practice'; render(); break;
+
+      /* 模拟考 */
+      case 'e-mode': e.mode = arg; e.count = arg === 'quick' ? 30 : examCfg().count; render(); break;
+      case 'e-ch': if (arg === '0') e.chs = []; else toggleArr(e.chs, +arg); render(); break;
+      case 'e-count': e.count = +arg; render(); break;
+      case 'e-start': {
+        var ec = examCfg();
+        var cnt = e.mode === 'real' ? ec.count : e.mode === 'quick' ? 30 : e.count;
+        var chs = e.mode === 'custom' ? e.chs : [];
+        var queue = blueprintSample(cnt, chs);
+        var mins = e.mode === 'real' ? ec.minutes : Math.round(queue.length * ec.minutes / ec.count);
+        var label = e.mode === 'real' ? '全真模考' : e.mode === 'quick' ? '快速模考' : '自訂模考';
+        startExam(e.mode, queue, mins, label);
+        break;
+      }
+      case 'o-start': {
+        var parts = arg.split(':');
+        var qs = QUESTIONS.filter(function (q) { return q.src === parts[0]; }).map(function (q) { return q.id; });
+        var mins2 = parts[1] === 'timed' ? Math.round(qs.length * examCfg().minutes / examCfg().count) : 0;
+        startExam('official', qs, mins2, srcName(parts[0]), parts[0]);
+        break;
+      }
+      case 'e-answer': e.answers[byId[e.queue[e.idx]].id] = arg;
+        if (e.idx < e.queue.length - 1) e.idx++;
+        save(); render(); break;
+      case 'e-prev': if (e.idx) { e.idx--; render(); } break;
+      case 'e-next': if (e.idx < e.queue.length - 1) { e.idx++; render(); } break;
+      case 'e-jump': e.idx = +arg; e.gridOpen = false; render(); break;
+      case 'e-grid': e.gridOpen = !e.gridOpen; render(); break;
+      case 'e-flag': {
+        var qid = byId[e.queue[e.idx]].id;
+        if (e.flags[qid]) delete e.flags[qid]; else e.flags[qid] = 1;
+        save(); render(); break;
+      }
+      case 'e-submit':
+        if (Object.keys(e.answers).length < e.queue.length) { State.confirmSubmit = true; render(); }
+        else submitExam(false);
+        break;
+      case 'e-submit-cancel': State.confirmSubmit = false; render(); break;
+      case 'e-submit-force': State.confirmSubmit = false; submitExam(false); break;
+      case 'e-showall': e.showAll = !e.showAll; render(); break;
+      case 'e-quit':
+        if (e.phase === 'run' && !window.confirm('退出後本次作答不保存，確定？')) break;
+        e.phase = 'setup'; e.queue = []; e.answers = {}; e.result = null;
+        State.view = 'home'; save(); render(); break;
+
+      /* 要点 */
+      case 'n-tab': State.note.tab = arg; render(); break;
+      case 'n-open': State.note.ch = +arg; State.note.open = {}; State.view = 'note'; render(); break;
+      case 'n-back': State.view = 'notes'; render(); break;
+      case 'n-sec': {
+        var o = State.note.open;
+        o[arg] = o[arg] === false ? true : false;
+        render(); break;
+      }
+
+      /* 列表 */
+      case 'w-redo': startPractice(shuffle(stats().wrongBook)); break;
+      case 'w-remove': toggleArr(State.wrongRemoved, arg); save(); render(); break;
+      case 'f-redo': startPractice(stats().favs.slice()); break;
+      case 'l-open': startPractice([arg]); break;
+      case 'noop': break;
+    }
+  }
+
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    while (t && t !== document.body && !t.getAttribute('data-act')) t = t.parentNode;
+    if (!t || t === document.body) return;
+    handleAct(t.getAttribute('data-act'), t.getAttribute('data-arg'), t);
+  });
+  document.addEventListener('input', function (ev) {
+    if (ev.target && ev.target.id === 'searchin') {
+      State.search.q = ev.target.value;
+      /* 只重绘结果区，避免输入框失焦：简单起见整页重绘并复焦 */
+      var hits = searchHits();
+      var card = document.querySelector('.wrap .card');
+      var html = State.search.q.trim().length >= 2
+        ? (hits.length ? qListRows(hits) : '<div class="empty">沒有匹配的題目</div>') : '';
+      if (card) card.innerHTML = html;
+      else if (html) {
+        var w = document.querySelector('.wrap');
+        var d = document.createElement('div'); d.className = 'card'; d.innerHTML = html;
+        w.appendChild(d);
+      }
+    }
+  });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName)) return;
+    var k = ev.key.toUpperCase();
+    var map = { '1': 'A', '2': 'B', '3': 'C', '4': 'D' };
+    var letter = map[k] || (/^[A-D]$/.test(k) ? k : null);
+    if (State.view === 'practice' && State.practice.phase === 'run') {
+      if (letter) answerPractice(letter);
+      else if (ev.key === 'ArrowRight' || ev.key === 'Enter') handleAct('p-next');
+      else if (ev.key === 'ArrowLeft') handleAct('p-prev');
+    } else if (State.view === 'exam' && State.exam.phase === 'run') {
+      if (letter) handleAct('e-answer', letter);
+      else if (ev.key === 'ArrowRight') handleAct('e-next');
+      else if (ev.key === 'ArrowLeft') handleAct('e-prev');
+    }
+  });
+
+  /* ============================================================
+     解锁（加密模式）—— openssl Salted__ 格式，PBKDF2+AES-CBC
+     ============================================================ */
+  var Lock = { busy: false, err: '', noCrypto: false };
+  function b64ToBytes(b64) {
+    var s = atob(b64), a = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+    return a;
+  }
+  function unlock(pw) {
+    var raw = b64ToBytes(window.VAULT);
+    var magic = '';
+    for (var i = 0; i < 8; i++) magic += String.fromCharCode(raw[i]);
+    if (magic !== 'Salted__') return Promise.reject(new Error('数据包格式异常'));
+    var salt = raw.slice(8, 16), ct = raw.slice(16);
+    var iter = window.VAULT_ITER || 310000;
+    var subtle = window.crypto && window.crypto.subtle;
+    return subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveBits'])
+      .then(function (base) {
+        return subtle.deriveBits({ name: 'PBKDF2', salt: salt, iterations: iter, hash: 'SHA-256' }, base, 384);
+      })
+      .then(function (bits) {
+        var kb = new Uint8Array(bits);
+        return subtle.importKey('raw', kb.slice(0, 32), { name: 'AES-CBC' }, false, ['decrypt'])
+          .then(function (key) {
+            return subtle.decrypt({ name: 'AES-CBC', iv: kb.slice(32, 48) }, key, ct);
+          });
+      })
+      .then(function (buf) {
+        var text = new TextDecoder().decode(buf);
+        if (text.slice(0, 4) !== 'HK26') throw new Error('口令错误');
+        var d = JSON.parse(text.slice(4));
+        Object.keys(d).forEach(function (k) { window[k] = d[k]; });
+      });
+  }
+  function lockHTML() {
+    return '<div class="lock"><div class="lock-card">' +
+      '<div class="lock-badge">' + ic('target', 26) + '</div>' +
+      '<div class="lock-t">学习平台</div>' +
+      '<div class="lock-s">刷题 · 模拟考 · 要点速记</div>' +
+      (Lock.noCrypto
+        ? '<div class="lock-err">当前环境不支持解密。<br>请用 https 链接打开（本地直接双击 HTML 文件不行）。</div>'
+        : '<form id="lockform" autocomplete="on">' +
+        '<input id="pw" type="password" placeholder="请输入口令" autocomplete="current-password" ' + (Lock.busy ? 'disabled' : '') + '>' +
+        (Lock.err ? '<div class="lock-err">' + esc(Lock.err) + '</div>' : '') +
+        '<button class="btn brand block" type="submit" style="margin-top:12px" ' + (Lock.busy ? 'disabled' : '') + '>' +
+        (Lock.busy ? '解锁中…' : '进入') + '</button></form>') +
+      '<div class="lock-f">非官方学习工具 · 请尊重资料版权</div>' +
+      '</div></div>';
+  }
+  function renderLock() {
+    var el = document.getElementById('app');
+    document.documentElement.setAttribute('data-theme', State.theme);
+    el.innerHTML = lockHTML();
+    var f = document.getElementById('lockform');
+    if (f) {
+      f.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        tryUnlock(document.getElementById('pw').value);
+      });
+      var i = document.getElementById('pw');
+      if (i && !Lock.busy) i.focus();
+    }
+  }
+  function tryUnlock(pw) {
+    if (!pw) { Lock.err = '请输入口令'; renderLock(); return; }
+    Lock.busy = true; Lock.err = ''; renderLock();
+    unlock(pw).then(function () {
+      try { sessionStorage.setItem(PASS_KEY, pw); } catch (e) { }
+      start();
+    }).catch(function () {
+      Lock.busy = false; Lock.err = '口令不对，再试一次';
+      try { sessionStorage.removeItem(PASS_KEY); } catch (e) { }
+      renderLock();
+    });
+  }
+
+  /* ---------- 启动 ---------- */
+  function start() {
+    initData();
+    /* 恢复中断的模考：时间已耗尽则直接结算 */
+    var e = State.exam;
+    if (e.phase === 'run' && e.timed && Date.now() >= e.endAt) submitExam(true);
+    else render();
+  }
+  load();
+  if (!localStorage.getItem(KEY) && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    State.theme = 'dark';
+  }
+  if (window.HKSI_QUESTIONS) {
+    start();
+  } else if (window.VAULT) {
+    if (!(window.crypto && window.crypto.subtle)) { Lock.noCrypto = true; renderLock(); }
+    else {
+      var saved = null;
+      try { saved = sessionStorage.getItem(PASS_KEY); } catch (e) { }
+      if (saved) { Lock.busy = true; renderLock(); unlock(saved).then(start).catch(function () { Lock.busy = false; renderLock(); }); }
+      else renderLock();
+    }
+  } else {
+    document.getElementById('app').innerHTML = '<div class="empty">题库未加载</div>';
+  }
+})();
