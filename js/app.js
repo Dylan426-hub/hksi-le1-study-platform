@@ -7,6 +7,7 @@
 
   var KEY = 'hksi-le1-v1';
   var PASS_KEY = 'hksi-le1-pass';
+  var restoredView = false;
 
   /* 数据在 initData() 装填 */
   var META, CHAPTERS, QUESTIONS, NOTES, byId, chMap;
@@ -36,7 +37,7 @@
     attempts: {},          /* qid -> {c:最近是否对, n:次数, r:对的次数, at:ts} */
     favorites: [], wrongRemoved: [], examHistory: [],
     practice: { phase: 'setup', chs: [], srcs: ['bank', 'past2006', 'sample2023'], scope: 'all', order: 'seq', queue: [], idx: 0, sel: null, graded: false, roundRight: 0, roundDone: 0 },
-    exam: { phase: 'setup', mode: 'real', chs: [], count: 60, minutes: 90, timed: true, src: null, queue: [], idx: 0, answers: {}, flags: {}, endAt: 0, gridOpen: false, result: null, showAll: false },
+    exam: { phase: 'setup', mode: 'real', chs: [], count: 60, minutes: 90, timed: true, src: null, queue: [], idx: 0, answers: {}, flags: {}, endAt: 0, remainingMs: 0, paused: false, gridOpen: false, result: null, showAll: false, sessionId: null },
     note: { ch: 0, open: {}, tab: 'ch' },
     search: { q: '' },
     confirmSubmit: false
@@ -67,21 +68,33 @@
   }
   function pct(a, b) { return b ? Math.round(a / b * 100) : 0; }
   function hasEn(q) { return !!(q.en && q.en.q); }
+  function owns(o, k) { return Object.prototype.hasOwnProperty.call(o || {}, k); }
 
   /* ---------- 持久化 ---------- */
   function load() {
     try {
       var o = JSON.parse(localStorage.getItem(KEY) || '{}');
+      if (typeof o.view === 'string') { State.view = o.view; restoredView = true; }
       ['attempts', 'favorites', 'wrongRemoved', 'examHistory', 'theme', 'lang'].forEach(function (k) {
         if (o[k] != null) State[k] = o[k];
       });
       if (o.practice && o.practice.phase === 'run' && o.practice.queue.length) State.practice = o.practice;
-      if (o.exam && (o.exam.phase === 'run' || o.exam.phase === 'result')) State.exam = o.exam;
+      if (o.exam && (o.exam.phase === 'run' || o.exam.phase === 'result')) {
+        State.exam = o.exam;
+        State.exam.answers = State.exam.answers || {};
+        State.exam.flags = State.exam.flags || {};
+        State.exam.paused = !!State.exam.paused;
+        if (typeof State.exam.remainingMs !== 'number') {
+          State.exam.remainingMs = State.exam.timed ? Math.max(0, (State.exam.endAt || 0) - Date.now()) : 0;
+        }
+        if (!State.exam.sessionId) State.exam.sessionId = 'legacy-' + (State.exam.endAt || Date.now());
+      }
     } catch (e) { /* 忽略损坏的本地存储 */ }
   }
   function save() {
     try {
       localStorage.setItem(KEY, JSON.stringify({
+        view: State.view,
         attempts: State.attempts, favorites: State.favorites, wrongRemoved: State.wrongRemoved,
         examHistory: State.examHistory, theme: State.theme, lang: State.lang,
         practice: State.practice.phase === 'run' ? State.practice : null,
@@ -96,6 +109,8 @@
     book: '<path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H19v18H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M4 17.5A2.5 2.5 0 0 1 6.5 15H19"/>',
     star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5.5l3.5 2"/>',
+    pause: '<path d="M8 5v14M16 5v14"/>',
+    play: '<path d="m8 5 11 7-11 7z"/>',
     x: '<path d="M6 6l12 12M18 6 6 18"/>',
     chev: '<path d="m6 9 6 6 6-6"/>',
     back: '<path d="m15 5-7 7 7 7"/>',
@@ -144,11 +159,64 @@
       chs: chs
     };
   }
-  function recordAttempt(qid, correct) {
+  function recordAttempt(qid, correct, origin, sessionId) {
     var a = State.attempts[qid] || { n: 0, r: 0 };
     a.n++; if (correct) a.r++;
     a.c = correct; a.at = Date.now();
+    if (origin) a.origin = origin;
+    if (sessionId) a.sessionId = sessionId;
+    else if (origin === 'practice') delete a.sessionId;
     State.attempts[qid] = a;
+  }
+
+  /* 旧版曾把整份模考的未答题全部记为错题。旧数据没有保存未答题 ID，
+     因此只提供显式修复：保留可确定答对的题，撤回同一提交批次中的错误记录。 */
+  function legacyPollutionCandidate() {
+    var active = State.exam;
+    var lastHistoryIndex = State.examHistory.length - 1;
+    var lastHistory = State.examHistory[lastHistoryIndex];
+    if (active.phase === 'result' && active.queue && active.answers && active.result && active.result.answered == null &&
+        !active.result.legacyRepairedAt && lastHistory && !lastHistory.legacyRepairedAt) {
+      var exactIds = active.queue.filter(function (id) {
+        var a = State.attempts[id];
+        return !owns(active.answers, id) && a && a.n === 1 && !a.origin && a.c === false &&
+          Math.abs((a.at || 0) - lastHistory.at) <= 2000;
+      });
+      if (exactIds.length) return { historyIndex: lastHistoryIndex, ids: exactIds, history: lastHistory, exact: true };
+    }
+    for (var i = State.examHistory.length - 1; i >= 0; i--) {
+      var h = State.examHistory[i];
+      if (!h || h.answered != null || h.legacyRepairedAt || !h.at || !h.count) continue;
+      var ids = Object.keys(State.attempts).filter(function (id) {
+        var a = State.attempts[id];
+        return a && a.n === 1 && !a.origin && a.c === false && Math.abs((a.at || 0) - h.at) <= 2000;
+      });
+      if (ids.length >= Math.max(10, h.count - 5)) return { historyIndex: i, ids: ids, history: h, exact: false };
+    }
+    return null;
+  }
+  function repairLegacyPollution() {
+    var c = legacyPollutionCandidate();
+    if (!c) { window.alert('沒有找到可修復的舊版誤記。'); return; }
+    var msg = '將撤回最近一次舊版模考中 ' + c.ids.length + ' 道' + (c.exact ? '未作答但被誤記的題目。' : '疑似誤記的錯題。') + '\n\n' +
+      (c.exact ? '本次仍保留完整答題資料，可以精確修復。' : '舊版沒有保存「未作答」題目的身份，因此本次真正答錯的題目也可能一併撤回；能確定答對的題目會保留。') + '是否繼續？';
+    if (!window.confirm(msg)) return;
+    try { localStorage.setItem(KEY + '-before-legacy-repair-' + Date.now(), localStorage.getItem(KEY) || ''); } catch (e) { }
+    c.ids.forEach(function (id) {
+      var a = State.attempts[id];
+      if (a && a.n === 1) delete State.attempts[id];
+    });
+    State.wrongRemoved = State.wrongRemoved.filter(function (id) { return c.ids.indexOf(id) < 0; });
+    if (State.examHistory[c.historyIndex]) {
+      State.examHistory[c.historyIndex].legacyRepairedAt = Date.now();
+      State.examHistory[c.historyIndex].legacyRepairedCount = c.ids.length;
+    }
+    if (c.exact && State.exam.result) {
+      State.exam.result.legacyRepairedAt = Date.now();
+      State.exam.result.legacyRepairedCount = c.ids.length;
+    }
+    save(); render();
+    window.alert('已撤回 ' + c.ids.length + ' 道舊版疑似誤記。');
   }
 
   /* ---------- 小组件 ---------- */
@@ -202,6 +270,7 @@
     var st = stats(), ec = examCfg();
     var officialCount = QUESTIONS.filter(function (q) { return q.src === 'past2006' || q.src === 'sample2023'; }).length;
     var noteCount = NOTES.length;
+    var repair = legacyPollutionCandidate();
     var h = topbar(BRAND.homeTitle, BRAND.homeSub, null,
       '<button class="iconbtn" data-act="nav" data-arg="search">' + ic('search', 18) + '</button>');
     h += '<div class="wrap">';
@@ -226,6 +295,20 @@
       return '<button class="navitem" data-act="nav" data-arg="' + n[0] + '">' + ic(n[1], 22) +
         '<div class="nt">' + n[2] + '</div><div class="ns">' + n[3] + '</div></button>';
     }).join('') + '</div>';
+
+    if (State.exam.phase === 'run' && State.exam.queue.length) {
+      var ae = State.exam, aa = Object.keys(ae.answers || {}).length;
+      h += '<div class="card active-exam"><div class="card-t">' + ic('clock', 18) + '未完成的模擬考</div>' +
+        '<div class="muted">' + esc(ae.label || '模擬考') + ' · 已答 ' + aa + '/' + ae.queue.length +
+        (ae.timed ? ' · 剩餘 ' + fmtClock(examRemainingMs()) : ' · 不計時') + '</div>' +
+        '<button class="btn brand block" style="margin-top:12px" data-act="e-continue">繼續模擬考</button>' +
+        '<button class="btn danger block" style="margin-top:8px" data-act="e-discard">放棄本次</button></div>';
+    }
+    if (repair) {
+      h += '<div class="card repair-card"><div class="card-t">' + ic('warn', 18) + '修復舊版模考誤記</div>' +
+        '<div class="muted">找到最近一次舊版模考中 ' + repair.ids.length + ' 道' + (repair.exact ? '未作答誤記' : '疑似誤記錯題') + '。</div>' +
+        '<button class="btn block" style="margin-top:12px" data-act="repair-legacy">檢查並修復</button></div>';
+    }
 
     h += '<div class="card"><div class="card-t">' + ic('layers', 18) + '章節掌握</div>';
     h += st.chs.map(function (c) {
@@ -415,6 +498,47 @@
     });
     return shuffle(out).map(function (q) { return q.id; });
   }
+  function examRemainingMs() {
+    var e = State.exam;
+    if (!e.timed) return 0;
+    return e.paused ? Math.max(0, e.remainingMs || 0) : Math.max(0, (e.endAt || 0) - Date.now());
+  }
+  function pauseExam() {
+    var e = State.exam;
+    if (e.phase !== 'run' || e.paused) return true;
+    if (e.timed) {
+      var left = examRemainingMs();
+      if (left <= 0) { submitExam(true); return false; }
+      e.remainingMs = left;
+      e.endAt = 0;
+    }
+    e.paused = true;
+    stopTimer(); save();
+    return true;
+  }
+  function resumeExam() {
+    var e = State.exam;
+    if (e.phase !== 'run' || !e.paused) return true;
+    if (e.timed) {
+      if (!(e.remainingMs > 0)) { submitExam(true); return false; }
+      e.endAt = Date.now() + e.remainingMs;
+    }
+    e.paused = false;
+    save();
+    return true;
+  }
+  function clearExam() {
+    var e = State.exam;
+    stopTimer();
+    e.phase = 'setup'; e.queue = []; e.idx = 0; e.answers = {}; e.flags = {};
+    e.result = null; e.endAt = 0; e.remainingMs = 0; e.paused = false; e.sessionId = null;
+    State.confirmSubmit = false;
+  }
+  function reconcileExamClock() {
+    var e = State.exam;
+    if (!byId) return;
+    if (e.phase === 'run' && e.timed && !e.paused && examRemainingMs() <= 0) submitExam(true);
+  }
   function vExamSetup() {
     var e = State.exam, ec = examCfg();
     var customAvailable = QUESTIONS.filter(function (q) {
@@ -460,32 +584,40 @@
     e.queue = queue; e.idx = 0; e.answers = {}; e.flags = {};
     e.timed = minutes > 0;
     e.minutes = minutes || 0;
-    e.endAt = minutes > 0 ? Date.now() + minutes * 60000 : 0;
+    e.remainingMs = minutes > 0 ? minutes * 60000 : 0;
+    e.endAt = minutes > 0 ? Date.now() + e.remainingMs : 0;
+    e.paused = false;
+    e.sessionId = 'exam-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     e.gridOpen = false; e.result = null; e.label = label; e.showAll = false;
     State.confirmSubmit = false;
     State.view = 'exam'; save(); render();
   }
   function submitExam(auto) {
     var e = State.exam, ec = examCfg();
+    if (e.phase !== 'run') return;
     stopTimer();
-    var right = 0, byCh = {};
+    var right = 0, answered = 0, byCh = {};
     e.queue.forEach(function (id) {
       var q = byId[id]; if (!q) return;
-      var c = byCh[q.ch] = byCh[q.ch] || { total: 0, right: 0 };
+      var c = byCh[q.ch] = byCh[q.ch] || { total: 0, answered: 0, right: 0 };
       c.total++;
-      var ok = e.answers[id] === q.ans;
+      var hasAnswer = owns(e.answers, id);
+      var ok = hasAnswer && e.answers[id] === q.ans;
+      if (hasAnswer) { answered++; c.answered++; }
       if (ok) { right++; c.right++; }
-      recordAttempt(id, ok);
+      if (hasAnswer) recordAttempt(id, ok, 'exam', e.sessionId);
     });
     var p = pct(right, e.queue.length);
     e.result = {
-      right: right, count: e.queue.length, pct: p, pass: p >= ec.passPct, auto: !!auto,
+      right: right, answered: answered, unanswered: e.queue.length - answered,
+      count: e.queue.length, pct: p, pass: p >= ec.passPct, auto: !!auto,
       byCh: Object.keys(byCh).sort(function (a, b) { return a - b; }).map(function (ch) {
-        return { ch: +ch, total: byCh[ch].total, right: byCh[ch].right };
+        return { ch: +ch, total: byCh[ch].total, answered: byCh[ch].answered, right: byCh[ch].right };
       })
     };
     e.phase = 'result';
-    State.examHistory.push({ at: Date.now(), label: e.label, right: right, count: e.queue.length, pct: p, pass: p >= ec.passPct });
+    e.paused = false; e.remainingMs = 0; e.endAt = 0;
+    State.examHistory.push({ at: Date.now(), label: e.label, right: right, answered: answered, count: e.queue.length, pct: p, pass: p >= ec.passPct, sessionId: e.sessionId });
     if (State.examHistory.length > 30) State.examHistory = State.examHistory.slice(-30);
     save(); render();
   }
@@ -493,17 +625,29 @@
     var e = State.exam;
     var q = byId[e.queue[e.idx]];
     var answered = Object.keys(e.answers).length;
-    var h = topbar(e.label || '模擬考', (e.idx + 1) + ' / ' + e.queue.length, 'e-quit',
-      '<button class="iconbtn' + (e.flags[q.id] ? ' on' : '') + '" data-act="e-flag">' + ic('flag', 17) + '</button>' +
+    var h = topbar(e.label || '模擬考', e.paused ? '已暫停' : (e.idx + 1) + ' / ' + e.queue.length, 'e-quit',
+      e.paused ? '' : '<button class="iconbtn' + (e.flags[q.id] ? ' on' : '') + '" data-act="e-flag">' + ic('flag', 17) + '</button>' +
       '<button class="iconbtn" data-act="e-grid">' + ic('grid', 17) + '</button>');
     h += '<div class="wrap">';
+    if (e.paused) {
+      h += '<div class="card result-hero pause-card">' + ic('pause', 38) +
+        '<div class="verdict">模擬考已暫停</div>' +
+        (e.timed ? '<div class="pause-time">剩餘 ' + fmtClock(examRemainingMs()) + '</div>' : '<div class="muted">不計時模式</div>') +
+        '<div class="muted" style="margin-top:8px">已答 ' + answered + '/' + e.queue.length + '；暫停期間不會扣時，也不能作答。</div>' +
+        '<button class="btn brand block" style="margin-top:18px" data-act="e-resume">' + ic('play', 16) + '繼續模擬考</button>' +
+        '<button class="btn block" style="margin-top:10px" data-act="e-save-exit">保存並返回首頁</button>' +
+        '<button class="btn danger block" style="margin-top:10px" data-act="e-discard">放棄本次</button>' +
+        '</div></div>';
+      return h;
+    }
     h += '<div class="exambar">' +
-      (e.timed ? '<div class="clock" id="clock">--:--</div>' : '<div class="chip">不計時</div>') +
+      (e.timed ? '<div class="clock" id="clock">' + fmtClock(examRemainingMs()) + '</div>' : '<div class="chip">不計時</div>') +
       '<div class="muted" style="flex:1">已答 ' + answered + '/' + e.queue.length + '</div>' +
+      '<button class="btn sm" data-act="e-pause">' + ic('pause', 14) + '暫停</button>' +
       '<button class="btn sm brand" data-act="e-submit">交卷</button></div>';
     if (State.confirmSubmit) {
       h += '<div class="card" style="border-color:var(--warn)"><b>還有 ' + (e.queue.length - answered) + ' 題未作答</b>' +
-        '<div class="muted" style="margin:6px 0 12px">確定要交卷嗎？未答題目按錯誤計分。</div>' +
+        '<div class="muted" style="margin:6px 0 12px">確定要交卷嗎？未答題目不會得分，但不會加入已做或錯題本。</div>' +
         '<div style="display:flex;gap:10px"><button class="btn" data-act="e-submit-cancel" style="flex:1">繼續作答</button>' +
         '<button class="btn danger" data-act="e-submit-force" style="flex:1">確定交卷</button></div></div>';
     }
@@ -527,11 +671,15 @@
   }
   function vExamResult() {
     var e = State.exam, r = e.result, ec = examCfg();
+    var resultAnswered = r.answered == null ? Object.keys(e.answers || {}).length : r.answered;
+    var resultUnanswered = r.unanswered == null ? Math.max(0, r.count - resultAnswered) : r.unanswered;
     var h = topbar('成績單', e.label, 'e-quit');
     h += '<div class="wrap">';
     h += '<div class="card result-hero">' +
       ring(r.pct, 130, r.pass ? 'var(--ok)' : 'var(--bad)', r.pct + '%', r.right + '/' + r.count) +
       '<div class="verdict ' + (r.pass ? 'pass' : 'fail') + '">' + (r.pass ? '合格 ✓' : '未達 ' + ec.passPct + '%') + '</div>' +
+      '<div class="muted" style="margin-top:6px">已答 ' + resultAnswered + '/' + r.count +
+      (resultUnanswered ? ' · 未答 ' + resultUnanswered : '') + '</div>' +
       (r.auto ? '<div class="faint" style="margin-top:4px">時間到自動交卷</div>' : '') +
       '</div>';
     h += '<div class="card"><div class="card-t">章節表現</div>' + r.byCh.map(function (c) {
@@ -540,7 +688,7 @@
       return '<div class="result-row"><div class="rn">第' + c.ch + '章 ' + esc(cm.zh) + '</div>' +
         '<div class="rv">' + c.right + '/' + c.total + ' · <b style="color:var(--' + (a >= ec.passPct ? 'ok' : 'bad') + ')">' + a + '%</b></div></div>';
     }).join('') + '</div>';
-    var wrongs = e.queue.filter(function (id) { var q = byId[id]; return q && e.answers[id] !== q.ans; });
+    var wrongs = e.queue.filter(function (id) { var q = byId[id]; return q && owns(e.answers, id) && e.answers[id] !== q.ans; });
     h += '<div class="card"><div class="card-t">' + ic('x', 17) + '複盤（' + (e.showAll ? '全部 ' + e.queue.length : '錯題 ' + wrongs.length) + '）' +
       '<span style="flex:1"></span><button class="btn sm" data-act="e-showall">' + (e.showAll ? '只看錯題' : '看全部') + '</button></div></div>';
     (e.showAll ? e.queue : wrongs).forEach(function (id) {
@@ -664,8 +812,14 @@
   }
   function vWrong() {
     var st = stats();
+    var repair = legacyPollutionCandidate();
     var h = topbar('錯題本', st.wrongBook.length + ' 題', 'home2');
     h += '<div class="wrap">';
+    if (repair) {
+      h += '<div class="card repair-card"><div class="card-t">' + ic('warn', 18) + '舊版模考可能誤記</div>' +
+        '<div class="muted">可撤回最近一次舊版模考中的 ' + repair.ids.length + ' 道' + (repair.exact ? '未作答誤記' : '疑似誤記錯題') + '。</div>' +
+        '<button class="btn block" style="margin-top:12px" data-act="repair-legacy">檢查並修復</button></div>';
+    }
     if (!st.wrongBook.length) {
       h += '<div class="empty">' + ic('check', 34) + '錯題全部清掉了，漂亮</div>';
     } else {
@@ -714,8 +868,8 @@
   function stopTimer() { if (timerId) { clearInterval(timerId); timerId = null; } }
   function tickExam() {
     var e = State.exam;
-    if (e.phase !== 'run' || !e.timed) { stopTimer(); return; }
-    var left = e.endAt - Date.now();
+    if (e.phase !== 'run' || !e.timed || e.paused) { stopTimer(); return; }
+    var left = examRemainingMs();
     if (left <= 0) { submitExam(true); return; }
     var el = document.getElementById('clock');
     if (el) {
@@ -738,7 +892,7 @@
     else if (v === 'favs') h = vFavs();
     else if (v === 'search') h = vSearch();
     el.innerHTML = h;
-    if (State.view === 'exam' && State.exam.phase === 'run' && State.exam.timed) {
+    if (State.view === 'exam' && State.exam.phase === 'run' && State.exam.timed && !State.exam.paused) {
       tickExam(); timerId = setInterval(tickExam, 500);
     }
     if (State.view === 'search') {
@@ -759,7 +913,7 @@
     p.roundDone++;
     var ok = k === q.ans;
     if (ok) p.roundRight++;
-    recordAttempt(q.id, ok);
+    recordAttempt(q.id, ok, 'practice');
     save(); render();
     var card = document.querySelector('.explain');
     if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -768,10 +922,13 @@
     var p = State.practice, e = State.exam;
     switch (act) {
       case 'nav':
+        if (State.view === 'exam' && e.phase === 'run' && arg !== 'exam') {
+          if (!pauseExam()) break;
+        }
         if (arg === 'practice' && p.phase !== 'run') { p.phase = 'setup'; }
         if (arg === 'exam' && e.phase === 'result') { /* 保留成绩单 */ }
-        State.view = arg; render(); break;
-      case 'home2': State.view = 'home'; render(); break;
+        State.view = arg; save(); render(); break;
+      case 'home2': State.view = 'home'; save(); render(); break;
       case 'theme': State.theme = State.theme === 'dark' ? 'light' : 'dark'; save(); render(); break;
       case 'lang':
         State.lang = State.lang === 'both' ? 'zh' : State.lang === 'zh' ? 'en' : 'both';
@@ -822,29 +979,57 @@
         startExam('official', qs, mins2, srcName(parts[0]), parts[0]);
         break;
       }
-      case 'e-answer': e.answers[byId[e.queue[e.idx]].id] = arg;
+      case 'e-answer':
+        if (e.paused) break;
+        reconcileExamClock();
+        if (e.phase !== 'run') break;
+        e.answers[byId[e.queue[e.idx]].id] = arg;
         if (e.idx < e.queue.length - 1) e.idx++;
         save(); render(); break;
-      case 'e-prev': if (e.idx) { e.idx--; render(); } break;
-      case 'e-next': if (e.idx < e.queue.length - 1) { e.idx++; render(); } break;
-      case 'e-jump': e.idx = +arg; e.gridOpen = false; render(); break;
-      case 'e-grid': e.gridOpen = !e.gridOpen; render(); break;
+      case 'e-prev': if (!e.paused && e.idx) { e.idx--; save(); render(); } break;
+      case 'e-next': if (!e.paused && e.idx < e.queue.length - 1) { e.idx++; save(); render(); } break;
+      case 'e-jump': if (!e.paused) { e.idx = +arg; e.gridOpen = false; save(); render(); } break;
+      case 'e-grid': if (!e.paused) { e.gridOpen = !e.gridOpen; save(); render(); } break;
       case 'e-flag': {
+        if (e.paused) break;
         var qid = byId[e.queue[e.idx]].id;
         if (e.flags[qid]) delete e.flags[qid]; else e.flags[qid] = 1;
         save(); render(); break;
       }
       case 'e-submit':
+        if (e.paused) break;
+        reconcileExamClock();
+        if (e.phase !== 'run') break;
         if (Object.keys(e.answers).length < e.queue.length) { State.confirmSubmit = true; render(); }
         else submitExam(false);
         break;
       case 'e-submit-cancel': State.confirmSubmit = false; render(); break;
-      case 'e-submit-force': State.confirmSubmit = false; submitExam(false); break;
+      case 'e-submit-force':
+        State.confirmSubmit = false;
+        reconcileExamClock();
+        if (e.phase === 'run') submitExam(false);
+        break;
+      case 'e-pause': if (pauseExam()) render(); break;
+      case 'e-resume':
+      case 'e-continue':
+        State.view = 'exam';
+        if (resumeExam()) render();
+        break;
+      case 'e-save-exit':
+        if (!e.paused && !pauseExam()) break;
+        State.view = 'home'; save(); render(); break;
+      case 'e-discard':
+        if (!window.confirm('放棄本次模擬考？目前答案不會寫入已做、錯題本或成績紀錄。')) break;
+        clearExam(); State.view = 'home'; save(); render(); break;
       case 'e-showall': e.showAll = !e.showAll; render(); break;
       case 'e-quit':
-        if (e.phase === 'run' && !window.confirm('退出後本次作答不保存，確定？')) break;
-        e.phase = 'setup'; e.queue = []; e.answers = {}; e.result = null;
-        State.view = 'home'; save(); render(); break;
+        if (e.phase === 'run') {
+          if (!e.paused && !pauseExam()) break;
+          State.view = 'home'; save(); render(); break;
+        }
+        clearExam(); State.view = 'home'; save(); render(); break;
+
+      case 'repair-legacy': repairLegacyPollution(); break;
 
       /* 要点 */
       case 'n-tab': State.note.tab = arg; render(); break;
@@ -902,6 +1087,10 @@
       else if (ev.key === 'ArrowLeft') handleAct('e-prev');
     }
   });
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) reconcileExamClock(); });
+  window.addEventListener('focus', reconcileExamClock);
+  window.addEventListener('pageshow', reconcileExamClock);
+  window.addEventListener('pagehide', save);
 
   /* ============================================================
      解锁（加密模式）—— openssl Salted__ 格式，PBKDF2+AES-CBC
@@ -983,9 +1172,10 @@
   /* ---------- 启动 ---------- */
   function start() {
     initData();
-    /* 恢复中断的模考：时间已耗尽则直接结算 */
+    /* 恢复中断的模考：暂停时不扣时；运行中则按绝对截止时间继续。 */
     var e = State.exam;
-    if (e.phase === 'run' && e.timed && Date.now() >= e.endAt) submitExam(true);
+    if (e.phase === 'run' && !restoredView) State.view = 'exam';
+    if (e.phase === 'run' && e.timed && !e.paused && Date.now() >= e.endAt) submitExam(true);
     else render();
   }
   load();

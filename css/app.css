@@ -185,6 +185,10 @@ body {
   background: var(--bg-card); border: 1px solid var(--line); border-radius: 11px; padding: 6px 13px;
 }
 .exambar .clock.low { color: var(--bad); border-color: var(--bad); animation: blink 1s infinite; }
+.pause-card > svg { color: var(--brand); margin-bottom: 8px; }
+.pause-card .pause-time { margin-top: 10px; font-size: 26px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.active-exam { border-color: color-mix(in srgb, var(--brand) 50%, var(--line)); }
+.repair-card { border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); background: var(--warn-soft); }
 @keyframes blink { 50% { opacity: .55; } }
 .gridwrap { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 7px; margin-top: 12px; }
 .gcell {
