@@ -88,6 +88,16 @@
       ['attempts', 'favorites', 'wrongRemoved', 'examHistory', 'archivedSessions', 'theme', 'lang', 'noteQuestionId'].forEach(function (k) {
         if (o[k] != null) State[k] = o[k];
       });
+      if (o.note && typeof o.note === 'object' && !Array.isArray(o.note)) {
+        if (typeof o.note.ch === 'number' && isFinite(o.note.ch) && o.note.ch >= 0 && Math.floor(o.note.ch) === o.note.ch) State.note.ch = o.note.ch;
+        if (o.note.tab === 'ch' || o.note.tab === 'num') State.note.tab = o.note.tab;
+        if (o.note.open && typeof o.note.open === 'object' && !Array.isArray(o.note.open)) {
+          State.note.open = {};
+          Object.keys(o.note.open).forEach(function (id) {
+            if (/^(0|[1-9]\d*)$/.test(id) && typeof o.note.open[id] === 'boolean') State.note.open[id] = o.note.open[id];
+          });
+        }
+      }
       if (o.practice && o.practice.phase === 'run' && o.practice.queue.length) State.practice = o.practice;
       if (o.exam && (o.exam.phase === 'run' || o.exam.phase === 'result')) {
         State.exam = o.exam;
@@ -104,7 +114,7 @@
   function save() {
     try {
       localStorage.setItem(KEY, JSON.stringify({
-        view: State.view, noteQuestionId: State.noteQuestionId,
+        view: State.view, note: State.note, noteQuestionId: State.noteQuestionId,
         attempts: State.attempts, favorites: State.favorites, wrongRemoved: State.wrongRemoved,
         examHistory: State.examHistory, archivedSessions: State.archivedSessions, theme: State.theme, lang: State.lang,
         practice: State.practice.phase === 'run' ? State.practice : null,
@@ -1161,13 +1171,13 @@
       case 'repair-legacy': repairLegacyPollution(); break;
 
       /* 要点 */
-      case 'n-tab': State.note.tab = arg; render(); break;
-      case 'n-open': State.note.ch = +arg; State.note.open = {}; State.view = 'note'; render(); break;
-      case 'n-back': State.view = 'notes'; render(); break;
+      case 'n-tab': State.note.tab = arg; save(); render(); break;
+      case 'n-open': State.note.ch = +arg; State.note.open = {}; State.view = 'note'; save(); render(); break;
+      case 'n-back': State.view = 'notes'; save(); render(); break;
       case 'n-sec': {
         var o = State.note.open;
         o[arg] = o[arg] === false ? true : false;
-        render(true); break;
+        save(); render(true); break;
       }
 
       /* 列表 */

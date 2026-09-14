@@ -30,7 +30,8 @@ function harness(saved, useStudy = true, savedStudy) {
   const study = { initCalls: [], noteCalls: [], renders: 0, init(args) { this.initCalls.push(args); }, countDue() { return 0; }, noteHTML(q) { this.noteCalls.push(q.id); return '<aside>SYNTHETIC_NOTE_HOOK</aside>'; }, render() { this.renders++; return '<article>SYNTHETIC_STUDY_RENDER</article>'; } };
   const win = { scrollY: 0, scrollTo() {}, alert() {}, confirm() { return true; }, addEventListener(type, cb) { (wevents[type] ||= []).push(cb); },
     HKSI_QUESTIONS: [question('old', 'retired'), question('quarantine', 'quarantined'), question('new', 'checked-public'), question('active', 'legacy', 2), question('official', 'legacy', 2, 'sample2023')],
-    HKSI_CHAPTERS: [{ n: 1, zh: 'Test chapter one' }, { n: 2, zh: 'Test chapter two' }], HKSI_META: { exam: { count: 3, minutes: 6, passPct: 70 } }, HKSI_NOTES: [],
+    HKSI_CHAPTERS: [{ n: 1, zh: 'Test chapter one' }, { n: 2, zh: 'Test chapter two' }, { n: 4, zh: 'Synthetic chapter four' }], HKSI_META: { exam: { count: 3, minutes: 6, passPct: 70 } },
+    HKSI_NOTES: [{ ch: 4, sections: [{ heading: 'Synthetic section zero', points: [{ t: 'Synthetic point zero' }] }, { heading: 'Synthetic section one', points: [{ t: 'Synthetic point one' }] }], sourceRefs: [] }],
     HKSI_CARDS: [{ id: 'card-new', ch: 1, front: 'Synthetic front', back: 'Synthetic answer', revision: 'test-r1', checkedAt: '2026-09-14', questionIds: ['new'], sourceRefs: [] }, { id: 'card-two', ch: 2, front: 'Second front', back: 'Second answer', revision: 'test-r1', sourceRefs: [] }], localStorage };
   if (useStudy && useStudy !== 'actual') win.StudyTools = study;
   const context = vm.createContext({ window: win, document: doc, localStorage, sessionStorage: localStorage, URL, Blob, TextEncoder, TextDecoder, Uint8Array, console, Date: FakeDate, setTimeout: cb => { const id = ++sequence; timeouts.set(id, cb); return id; }, clearTimeout: id => timeouts.delete(id), setInterval: cb => { const id = ++sequence; intervals.set(id, cb); return id; }, clearInterval: id => intervals.delete(id) });
@@ -240,6 +241,35 @@ test('official launch cannot discard an unarchived blocked exam', () => {
 test('legacy answered earlier practice item cannot be counted again after reload', () => {
   const h = harness({ view: 'practice', practice: { phase: 'run', queue: ['new', 'active'], idx: 1, sel: null, graded: false, roundDone: 1, roundRight: 1 }, attempts: { new: { n: 1, r: 1, c: true } } }); h.api.load(); h.api.start(); h.api.handleAct('p-prev'); h.api.answerPractice('B');
   assert.equal(h.state.attempts.new.n, 1, 'Earlier legacy answer was not migrated or locked, so review recorded a second attempt');
+});
+test('chapter four detail and collapsed sections persist immediately and after pagehide reload', () => {
+  const h = harness(); h.api.handleAct('n-open', '4');
+  let saved = JSON.parse(h.values.get('hksi-le1-v1') || '{}');
+  assert.equal(saved.view, 'note'); assert.equal(saved.note.ch, 4);
+  h.api.handleAct('n-sec', '0'); h.api.handleAct('n-sec', '1'); h.api.handleAct('n-sec', '1');
+  saved = JSON.parse(h.values.get('hksi-le1-v1'));
+  assert.deepEqual(saved.note, { ch: 4, tab: 'ch', open: { 0: false, 1: true } });
+  h.emitWindow('pagehide');
+  const fresh = harness(JSON.parse(h.values.get('hksi-le1-v1'))); fresh.api.load(); fresh.api.start();
+  assert.equal(fresh.state.view, 'note'); assert.deepEqual(plain(fresh.state.note), saved.note);
+  assert(fresh.app.innerHTML.includes('Synthetic chapter four')); assert(fresh.app.innerHTML.includes('Synthetic point zero'));
+  assert(fresh.app.innerHTML.includes('class="notesec"><button data-act="n-sec" data-arg="0"'));
+  assert(fresh.app.innerHTML.includes('class="notesec open"><button data-act="n-sec" data-arg="1"'));
+  assert(!fresh.app.innerHTML.includes('第0章'));
+});
+test('chapter notes tab and back navigation save before pagehide', () => {
+  const h = harness(); h.api.handleAct('nav', 'notes'); h.api.handleAct('n-tab', 'num');
+  let saved = JSON.parse(h.values.get('hksi-le1-v1')); assert.equal(saved.view, 'notes'); assert.equal(saved.note.tab, 'num');
+  h.api.handleAct('n-open', '4'); h.api.handleAct('n-back');
+  saved = JSON.parse(h.values.get('hksi-le1-v1')); assert.equal(saved.view, 'notes'); assert.equal(saved.note.ch, 4); assert.equal(saved.note.tab, 'num');
+  const fresh = harness(saved); fresh.api.load(); fresh.api.start(); assert.equal(fresh.state.view, 'notes'); assert.equal(fresh.state.note.tab, 'num');
+});
+test('chapter note restoration validates number, enum, object and boolean fields', () => {
+  for (const note of [null, 'invalid', [], { ch: '4', tab: 'other', open: [] }, { ch: -1, tab: null, open: 'invalid' }, { ch: 4.5 }]) {
+    const h = harness({ note }); h.api.load(); assert.deepEqual(plain(h.state.note), { ch: 0, open: {}, tab: 'ch' });
+  }
+  const h = harness({ note: { ch: 4, tab: 'num', open: JSON.parse('{"0":false,"1":true,"2":"false","3":1,"bad":false,"__proto__":false}') } }); h.api.load();
+  assert.deepEqual(plain(h.state.note), { ch: 4, open: { 0: false, 1: true }, tab: 'num' });
 });
 let passed = 0, failed = 0;
 console.log('SOURCE_SHA256 ' + crypto.createHash('sha256').update(source).digest('hex'));
