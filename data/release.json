@@ -1,0 +1,76 @@
+{
+  "revision": "20260914-1",
+  "updatedAt": "2026-09-14",
+  "updatedQuestions": 5,
+  "activeQuestions": 772,
+  "retainedOriginalQuestions": 793,
+  "retiredQuestions": 5,
+  "quarantinedQuestions": 21,
+  "notes": 3,
+  "cards": 8,
+  "examMapping": "pending-study-guide",
+  "checks": [
+    "original questions unchanged",
+    "unique active options",
+    "unique question IDs",
+    "valid card references",
+    "encryption round trip"
+  ],
+  "questionRevisions": [
+    {
+      "originalId": "b279",
+      "newId": "b279-r20260914",
+      "sourceRefs": [
+        {
+          "title": "SFC《持續培訓指引》（2022年1月）",
+          "url": "https://www.sfc.hk/-/media/EN/assets/components/codes/files-current/web/guidelines/guidelines-on-continuous-professional-training/Guidelines-on-Continuous-Professional-Training.pdf?rev=50728987dec448b0a2ae9e9e7f658354",
+          "locator": "第7頁，§5.2–5.3"
+        }
+      ]
+    },
+    {
+      "originalId": "b280",
+      "newId": "b280-r20260914",
+      "sourceRefs": [
+        {
+          "title": "SFC《持續培訓指引》（2022年1月）",
+          "url": "https://www.sfc.hk/-/media/EN/assets/components/codes/files-current/web/guidelines/guidelines-on-continuous-professional-training/Guidelines-on-Continuous-Professional-Training.pdf?rev=50728987dec448b0a2ae9e9e7f658354",
+          "locator": "第7頁，§5.2；第9頁，§5.8(f)"
+        }
+      ]
+    },
+    {
+      "originalId": "b548",
+      "newId": "b548-r20260914",
+      "sourceRefs": [
+        {
+          "title": "SFC《打擊洗錢及恐怖分子資金籌集指引》（2023年6月）",
+          "url": "https://www.sfc.hk/-/media/EN/assets/components/codes/files-current/web/guidelines/guideline-on-anti-money-laundering-and-counter-financing-of-terrorism-for-licensed-corporations/AML-Guideline-for-LCs-and-SFC-licensed-VASPs_Eng_1-Jun-2023.pdf?rev=d250206851484229ab949a4698761cb7",
+          "locator": "印刷第120–121頁，§8.3–8.8（§8.3由第119頁開始）"
+        }
+      ]
+    },
+    {
+      "originalId": "b325",
+      "newId": "b325-r20260914",
+      "sourceRefs": [
+        {
+          "title": "SFC《備存紀錄規則》常見問題",
+          "url": "https://www.sfc.hk/en/faqs/intermediaries/supervision/Keeping-of-Records-Rules/17-Mar-2003---Keeping-of-Records-Rules",
+          "locator": "Q10–Q12；規則第10條"
+        }
+      ]
+    },
+    {
+      "originalId": "b234",
+      "newId": "b234-r20260914",
+      "sourceRefs": [
+        {
+          "title": "SFC《投資者賠償》常見問題",
+          "url": "https://www.sfc.hk/en/faqs/Investor-compensation",
+          "locator": "Q3、Q5–Q6；2020年1月1日或之後的有關違責"
+        }
+      ]
+    }
+  ]
+}

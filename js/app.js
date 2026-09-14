@@ -8,6 +8,7 @@
   var KEY = 'hksi-le1-v1';
   var PASS_KEY = 'hksi-le1-pass';
   var restoredView = false;
+  var storageError = '';
 
   /* 数据在 initData() 装填 */
   var META, CHAPTERS, QUESTIONS, NOTES, byId, chMap;
@@ -22,7 +23,16 @@
     NOTES = window.HKSI_NOTES || [];
     byId = {}; QUESTIONS.forEach(function (q) { byId[q.id] = q; });
     chMap = {}; CHAPTERS.forEach(function (c) { chMap[c.n] = c; });
+    if (window.StudyTools) window.StudyTools.init({ questions: QUESTIONS, cards: window.HKSI_CARDS || [],
+      openQuestion: function (id, options) {
+        if (options && options.edit) {
+          State.noteQuestionId = id; State.view = 'question-note'; save(); render();
+        } else startPractice([id]);
+      }, redraw: render });
   }
+  function eligible(q) { return !!q && q.reviewStatus !== 'retired' && q.reviewStatus !== 'quarantined'; }
+  function updatedQuestions() { return QUESTIONS.filter(function (q) { return eligible(q) && q.reviewStatus === 'checked-public'; }); }
+  function blockedSession(s) { return !!s.legacyAnswersIncomplete || !!(s.queue && s.queue.some(function (id) { return !eligible(byId[id]); })); }
   function examCfg() { return (META && META.exam) || { count: 60, minutes: 90, passPct: 70 }; }
   function srcName(s) { return ((META && META.srcNames) || {})[s] || s; }
   function availableSources() {
@@ -35,10 +45,10 @@
   var State = {
     view: 'home', theme: 'light', lang: 'both',
     attempts: {},          /* qid -> {c:最近是否对, n:次数, r:对的次数, at:ts} */
-    favorites: [], wrongRemoved: [], examHistory: [],
+    favorites: [], wrongRemoved: [], examHistory: [], archivedSessions: [],
     practice: { phase: 'setup', chs: [], srcs: ['bank', 'past2006', 'sample2023'], scope: 'all', order: 'seq', queue: [], idx: 0, sel: null, graded: false, roundRight: 0, roundDone: 0 },
     exam: { phase: 'setup', mode: 'real', chs: [], count: 60, minutes: 90, timed: true, src: null, queue: [], idx: 0, answers: {}, flags: {}, endAt: 0, remainingMs: 0, paused: false, gridOpen: false, result: null, showAll: false, sessionId: null },
-    note: { ch: 0, open: {}, tab: 'ch' },
+    note: { ch: 0, open: {}, tab: 'ch' }, noteQuestionId: null,
     search: { q: '' },
     confirmSubmit: false
   };
@@ -75,7 +85,7 @@
     try {
       var o = JSON.parse(localStorage.getItem(KEY) || '{}');
       if (typeof o.view === 'string') { State.view = o.view; restoredView = true; }
-      ['attempts', 'favorites', 'wrongRemoved', 'examHistory', 'theme', 'lang'].forEach(function (k) {
+      ['attempts', 'favorites', 'wrongRemoved', 'examHistory', 'archivedSessions', 'theme', 'lang', 'noteQuestionId'].forEach(function (k) {
         if (o[k] != null) State[k] = o[k];
       });
       if (o.practice && o.practice.phase === 'run' && o.practice.queue.length) State.practice = o.practice;
@@ -94,13 +104,46 @@
   function save() {
     try {
       localStorage.setItem(KEY, JSON.stringify({
-        view: State.view,
+        view: State.view, noteQuestionId: State.noteQuestionId,
         attempts: State.attempts, favorites: State.favorites, wrongRemoved: State.wrongRemoved,
-        examHistory: State.examHistory, theme: State.theme, lang: State.lang,
+        examHistory: State.examHistory, archivedSessions: State.archivedSessions, theme: State.theme, lang: State.lang,
         practice: State.practice.phase === 'run' ? State.practice : null,
         exam: (State.exam.phase === 'run' || State.exam.phase === 'result') ? State.exam : null
       }));
-    } catch (e) { /* 配额满时静默失败 */ }
+      storageError = '';
+      return true;
+    } catch (e) {
+      storageError = '學習進度未能保存。請勿關閉頁面，先匯出備份並檢查瀏覽器儲存空間。';
+      return false;
+    }
+  }
+  function exportProgress() {
+    var data = { schemaVersion: 1, exportedAt: new Date().toISOString(), study: null, progress: State };
+    try { data.study = JSON.parse(localStorage.getItem('hksi-le1-study-v1') || 'null'); } catch (err) { }
+    var url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    var a = document.createElement('a'); a.href = url; a.download = 'hksi-learning-backup-' + Date.now() + '.json';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function sourceLinks(refs) {
+    return (refs || []).map(function (s) {
+      try {
+        var u = new URL(s.url);
+        if (u.protocol !== 'https:' || !/(^|\.)(sfc\.hk|hksi\.org)$/.test(u.hostname)) return '';
+        return '<div><a target="_blank" rel="noopener noreferrer" href="' + esc(u.href) + '">' + esc(s.title) + '</a> · ' + esc(s.locator || '') + '</div>';
+      } catch (e) { return ''; }
+    }).join('');
+  }
+  function blockedSessionHTML(kind) {
+    return topbar('舊版練習已保留', null, 'home2') + '<div class="wrap"><div class="card"><div class="card-t">舊版會話需要重新開始</div>' +
+      '<p>本次練習含已停用題，或舊版未保存完整的本輪答案，不能安全繼續計分。現有答案和作答紀錄會保留；開始新版練習時，這次進度會另行封存。</p>' +
+      '<button class="btn brand block" data-act="archive-session" data-arg="' + kind + '">封存並設定新版練習</button>' +
+      '<button class="btn block" data-act="export-progress">匯出完整學習備份</button></div></div>';
+  }
+  function archivePracticeBeforeReplace() {
+    var p = State.practice;
+    if (p.phase === 'run' && p.queue.length && p.idx < p.queue.length) {
+      State.archivedSessions.push({ kind: 'practice', archivedAt: Date.now(), reason: '開始另一組練習', session: JSON.parse(JSON.stringify(p)) });
+    }
   }
 
   /* ---------- 图标 ---------- */
@@ -137,36 +180,42 @@
   /* ---------- 统计 ---------- */
   function stats() {
     var done = 0, right = 0;
-    QUESTIONS.forEach(function (q) {
+    var active = QUESTIONS.filter(eligible);
+    active.forEach(function (q) {
       var a = State.attempts[q.id];
       if (a && a.n) { done++; if (a.c) right++; }
     });
-    var wrongBook = QUESTIONS.filter(function (q) {
+    var wrongBook = active.filter(function (q) {
       var a = State.attempts[q.id];
       return a && a.n && !a.c && State.wrongRemoved.indexOf(q.id) < 0;
     }).map(function (q) { return q.id; });
     var chs = CHAPTERS.map(function (c) {
-      var qs = QUESTIONS.filter(function (q) { return q.ch === c.n; });
+      var qs = active.filter(function (q) { return q.ch === c.n; });
       var d = 0, r = 0;
       qs.forEach(function (q) { var a = State.attempts[q.id]; if (a && a.n) { d++; if (a.c) r++; } });
       return { n: c.n, zh: c.zh, total: qs.length, done: d, right: r, pct: pct(d, qs.length), acc: pct(r, d) };
     });
     return {
-      total: QUESTIONS.length, done: done, right: right,
-      donePct: pct(done, QUESTIONS.length), acc: pct(right, done),
+      total: active.length, done: done, right: right,
+      donePct: pct(done, active.length), acc: pct(right, done),
       wrongBook: wrongBook,
-      favs: State.favorites.filter(function (id) { return byId[id]; }),
+      favs: State.favorites.filter(function (id) { return eligible(byId[id]); }),
       chs: chs
     };
   }
-  function recordAttempt(qid, correct, origin, sessionId) {
+  function recordAttempt(qid, correct, origin, sessionId, selectedOption) {
+    if (!eligible(byId[qid])) return;
     var a = State.attempts[qid] || { n: 0, r: 0 };
     a.n++; if (correct) a.r++;
     a.c = correct; a.at = Date.now();
+    a.questionRevision = byId[qid].revision || 'legacy';
+    a.selectedOption = selectedOption || null;
+    a.gradingRevision = '20260914-1';
     if (origin) a.origin = origin;
     if (sessionId) a.sessionId = sessionId;
     else if (origin === 'practice') delete a.sessionId;
     State.attempts[qid] = a;
+    if (!correct) State.wrongRemoved = State.wrongRemoved.filter(function (id) { return id !== qid; });
   }
 
   /* 旧版曾把整份模考的未答题全部记为错题。旧数据没有保存未答题 ID，
@@ -201,7 +250,8 @@
     var msg = '將撤回最近一次舊版模考中 ' + c.ids.length + ' 道' + (c.exact ? '未作答但被誤記的題目。' : '疑似誤記的錯題。') + '\n\n' +
       (c.exact ? '本次仍保留完整答題資料，可以精確修復。' : '舊版沒有保存「未作答」題目的身份，因此本次真正答錯的題目也可能一併撤回；能確定答對的題目會保留。') + '是否繼續？';
     if (!window.confirm(msg)) return;
-    try { localStorage.setItem(KEY + '-before-legacy-repair-' + Date.now(), localStorage.getItem(KEY) || ''); } catch (e) { }
+    try { localStorage.setItem(KEY + '-before-legacy-repair-' + Date.now(), localStorage.getItem(KEY) || ''); }
+    catch (e) { window.alert('未能建立備份，未修改舊紀錄。請先匯出備份並釋放儲存空間。'); return; }
     c.ids.forEach(function (id) {
       var a = State.attempts[id];
       if (a && a.n === 1) delete State.attempts[id];
@@ -245,10 +295,10 @@
   /* ---------- 顶栏 / 底栏 ---------- */
   function topbar(title, sub, backAct, extra) {
     return '<div class="topbar"><div class="topbar-in">' +
-      (backAct ? '<button class="iconbtn" data-act="' + backAct + '">' + ic('back', 19) + '</button>' : '') +
+      (backAct ? '<button class="iconbtn" aria-label="返回" data-act="' + backAct + '">' + ic('back', 19) + '</button>' : '') +
       '<div class="t">' + esc(title) + (sub ? '<span class="s">' + esc(sub) + '</span>' : '') + '</div>' +
       (extra || '') +
-      '<button class="iconbtn" data-act="theme">' + ic(State.theme === 'dark' ? 'sun' : 'moon', 18) + '</button>' +
+      '<button class="iconbtn" aria-label="切換顏色主題" data-act="theme">' + ic(State.theme === 'dark' ? 'sun' : 'moon', 18) + '</button>' +
       '</div></div>';
   }
   function tabbar() {
@@ -280,13 +330,13 @@
       '<div class="hero-s">' + ec.count + ' 題 · ' + ec.minutes + ' 分鐘 · ' + ec.passPct + '% 合格</div>' +
       '<div class="hero-facts">' +
       '<div class="hf"><b>' + st.done + '</b>已做 / ' + st.total + '</div>' +
-      '<div class="hf"><b>' + st.acc + '%</b>正確率</div>' +
+      '<div class="hf"><b>' + st.acc + '%</b>最近作答正確率</div>' +
       '<div class="hf"><b>' + st.wrongBook.length + '</b>錯題待清</div>' +
       '</div></div></div>';
 
     h += '<div class="navgrid">' + [
       ['practice', 'bolt', '刷題', st.total + ' 題', 0],
-      ['exam', 'clock', '模擬考', '全真 ' + ec.count + '/' + ec.minutes + '′', 0],
+      ['exam', 'clock', '模擬考', ec.count + '題 / ' + ec.minutes + '分鐘', 0],
       ['official', 'doc', '官方卷', officialCount ? officialCount + ' 題' : '暫未提供', 0],
       ['notes', 'book', '章節要點', noteCount ? noteCount + ' 章' : '暫未提供', 0],
       ['wrong', 'x', '錯題本', '待清 ' + st.wrongBook.length, st.wrongBook.length],
@@ -295,6 +345,13 @@
       return '<button class="navitem" data-act="nav" data-arg="' + n[0] + '">' + ic(n[1], 22) +
         '<div class="nt">' + n[2] + '</div><div class="ns">' + n[3] + '</div></button>';
     }).join('') + '</div>';
+
+    h += '<div class="card update-card"><div class="card-t">2026-09-14 題庫與復習更新</div>' +
+      '<p>' + updatedQuestions().length + ' 道題已按公開官方規則重寫；其餘舊題未完成逐題核驗。已停用題不再抽入練習，原有作答紀錄仍保留。</p>' +
+      '<div class="update-actions"><button class="btn brand" data-act="updated-practice">練習更新題</button>' +
+      '<button class="btn" data-act="nav" data-arg="study">速記與我的筆記' + (window.StudyTools ? ' · 待複習 ' + window.StudyTools.countDue() : '') + '</button>' +
+      '<button class="btn" data-act="nav" data-arg="updates">查看修訂與來源</button></div></div>';
+    if (State.practice.phase === 'run' && State.practice.queue.length) h += '<div class="card"><button class="btn block" data-act="nav" data-arg="practice">繼續上次練習</button></div>';
 
     if (State.exam.phase === 'run' && State.exam.queue.length) {
       var ae = State.exam, aa = Object.keys(ae.answers || {}).length;
@@ -310,7 +367,7 @@
         '<button class="btn block" style="margin-top:12px" data-act="repair-legacy">檢查並修復</button></div>';
     }
 
-    h += '<div class="card"><div class="card-t">' + ic('layers', 18) + '章節掌握</div>';
+    h += '<div class="card"><div class="card-t">' + ic('layers', 18) + '章節已做覆蓋率</div>';
     h += st.chs.map(function (c) {
       return '<div class="chrow" data-act="ch-practice" data-arg="' + c.n + '">' +
         '<div class="cn">' + c.n + '</div>' +
@@ -328,7 +385,8 @@
       }).join('') + '</div>';
     }
     h += '<div class="faint" style="text-align:center;margin-top:22px;white-space:pre-wrap">題庫：' +
-      esc(srcName('bank')) + ' · AI 解析僅供參考\n非官方學習工具 · 內容僅供個人備考使用</div>';
+      esc(srcName('bank')) + '\n已做不等於已掌握；舊版停用題不計入目前覆蓋率。\n非官方學習工具 · 進度只保存在本瀏覽器</div>' +
+      '<button class="btn block" style="margin-top:12px" data-act="export-progress">匯出完整學習備份</button>';
     h += '</div>' + tabbar();
     return h;
   }
@@ -359,7 +417,8 @@
     opts = opts || {};
     var fav = State.favorites.indexOf(q.id) >= 0;
     var h = '<div class="card">';
-    h += '<div class="qmeta">' + chChip(q.ch) + srcChip(q.src) +
+    h += '<div class="qmeta">' + chChip(q.ch) + '<span class="chip' + (q.reviewStatus === 'checked-public' ? ' ok' : '') + '">' +
+      (q.reviewStatus === 'checked-public' ? '公開官方資料改編' : !eligible(q) ? '舊版停用題' : '舊題 · 待逐題核查') + '</span>' +
       (q.code ? '<span class="chip">' + esc(q.code) + '</span>' : '') +
       (graded ? flagChip(q) : '') +
       (hasEn(q) ? '<button class="chip brand" data-act="lang" style="border:0;cursor:pointer;font-family:inherit">' +
@@ -385,8 +444,11 @@
         (sel === q.ans ? '答對了' : sel ? '答錯了 · 正確答案 ' + q.ans : '正確答案 ' + q.ans) + '</div>' +
         (q.note ? '<div style="margin-bottom:6px"><b>' + esc(q.note) + '</b></div>' : '') +
         (q.ex ? '<div>' + esc(q.ex) + '</div>' : '<div class="faint">此題暫無解析</div>') +
-        '<div class="ref">' + (q.ref ? esc(q.ref) + ' · ' : '') + 'AI 解析 · 依官方溫習手冊 3.5 版生成，僅供參考</div>' +
+        '<div class="ref">' + (q.ref ? esc(q.ref) + ' · ' : '') +
+        (q.reviewStatus === 'checked-public' ? '規則核查 ' + esc(q.checkedAt) + '；非官方試題，手冊逐題對照待核。' : '舊版解析未經本輪逐題核驗，不能作為現行規則的唯一依據。') +
+        sourceLinks(q.sourceRefs) + '</div>' +
         '</div>';
+      if (window.StudyTools) h += window.StudyTools.noteHTML(q);
     }
     h += '</div>';
     return h;
@@ -398,6 +460,8 @@
   function practicePool() {
     var p = State.practice, st = stats();
     return QUESTIONS.filter(function (q) {
+      if (!eligible(q)) return false;
+      if (p.scope === 'updated' && q.reviewStatus !== 'checked-public') return false;
       if (p.chs.length && p.chs.indexOf(q.ch) < 0) return false;
       if (p.srcs.length && p.srcs.indexOf(q.src) < 0) return false;
       var a = State.attempts[q.id];
@@ -423,7 +487,7 @@
         return '<button class="pick' + (p.srcs.indexOf(s) >= 0 ? ' on' : '') + '" data-act="p-src" data-arg="' + s + '">' + esc(srcName(s)) + '</button>';
       }).join('') + '</div></div>';
     h += '<div class="card"><div class="card-t">範圍與順序</div>' +
-      '<div class="seg" style="margin-bottom:10px">' + [['all', '全部'], ['new', '只刷未做'], ['wrong', '錯題'], ['fav', '收藏']].map(function (s) {
+      '<div class="seg" style="margin-bottom:10px">' + [['all', '可用題'], ['updated', '本次更新'], ['new', '未做'], ['wrong', '錯題'], ['fav', '收藏']].map(function (s) {
         return '<button class="' + (p.scope === s[0] ? 'on' : '') + '" data-act="p-scope" data-arg="' + s[0] + '">' + s[1] + '</button>';
       }).join('') + '</div>' +
       '<div class="seg">' + [['seq', '順序'], ['rnd', '隨機']].map(function (s) {
@@ -435,14 +499,20 @@
   }
   function startPractice(queue, idx) {
     var p = State.practice;
-    p.phase = 'run'; p.queue = queue; p.idx = idx || 0;
+    queue = queue.filter(function (id) { return eligible(byId[id]); });
+    if (!queue.length) { window.alert('此題已停用，請從「本次更新」選擇新版題目。'); return; }
+    archivePracticeBeforeReplace();
+    p.phase = 'run'; p.queue = queue; p.idx = idx || 0; p.answers = {}; p.legacyAnswersIncomplete = false;
     p.sel = null; p.graded = false; p.roundRight = 0; p.roundDone = 0;
     State.view = 'practice'; save(); render();
   }
   function vPracticeRun() {
     var p = State.practice;
+    if (blockedSession(p)) return blockedSessionHTML('practice');
     if (p.idx >= p.queue.length) return vPracticeDone();
     var q = byId[p.queue[p.idx]];
+    var previous = (p.answers || {})[q && q.id];
+    if (previous) { p.sel = previous; p.graded = true; }
     if (!q) { p.idx++; return vPracticeRun(); }
     var h = topbar('刷題', (p.idx + 1) + ' / ' + p.queue.length, 'p-quit');
     h += '<div class="wrap">';
@@ -475,7 +545,7 @@
   /* 全真模式：按题库各章占比（最大余额法）抽样 */
   function blueprintSample(count, chs) {
     var pool = QUESTIONS.filter(function (q) {
-      return q.src === 'bank' && (!chs.length || chs.indexOf(q.ch) >= 0);
+      return eligible(q) && q.src === 'bank' && (!chs.length || chs.indexOf(q.ch) >= 0);
     });
     var byCh = {};
     pool.forEach(function (q) { (byCh[q.ch] = byCh[q.ch] || []).push(q); });
@@ -518,6 +588,7 @@
   }
   function resumeExam() {
     var e = State.exam;
+    if (blockedSession(e)) { e.paused = true; render(); return false; }
     if (e.phase !== 'run' || !e.paused) return true;
     if (e.timed) {
       if (!(e.remainingMs > 0)) { submitExam(true); return false; }
@@ -542,16 +613,16 @@
   function vExamSetup() {
     var e = State.exam, ec = examCfg();
     var customAvailable = QUESTIONS.filter(function (q) {
-      return q.src === 'bank' && (!e.chs.length || e.chs.indexOf(q.ch) >= 0);
+      return eligible(q) && q.src === 'bank' && (!e.chs.length || e.chs.indexOf(q.ch) >= 0);
     }).length;
     var h = topbar('模擬考', null, 'home2');
     h += '<div class="wrap">';
     h += '<div class="card"><div class="card-t">' + ic('target', 18) + '模式</div>' +
-      '<div class="seg">' + [['real', '全真 ' + ec.count + '題'], ['quick', '快速 30題'], ['custom', '自訂']].map(function (s) {
+      '<div class="seg">' + [['real', ec.count + '題模考'], ['quick', '快速 30題'], ['custom', '自訂']].map(function (s) {
         return '<button class="' + (e.mode === s[0] ? 'on' : '') + '" data-act="e-mode" data-arg="' + s[0] + '">' + s[1] + '</button>';
       }).join('') + '</div>' +
       '<div class="muted" style="margin-top:10px">' +
-      (e.mode === 'real' ? '完全比照正式考試：' + ec.count + ' 題 · ' + ec.minutes + ' 分鐘 · ' + ec.passPct + '% 合格，按題庫章節比例抽題。'
+      (e.mode === 'real' ? ec.count + ' 題 · ' + ec.minutes + ' 分鐘 · ' + ec.passPct + '% 合格，按可用題庫章節比例抽題，並非官方試卷。'
         : e.mode === 'quick' ? '30 題 · 45 分鐘，章節比例抽題，快速自測。'
           : '自選章節，題數與時間按比例縮放。') + '</div>';
     if (e.mode === 'custom') {
@@ -565,7 +636,7 @@
         }).join('') + '</div>' +
         '<div class="muted" style="margin-top:10px">目前範圍可用 ' + customAvailable + ' 題；選擇超出時會按實際題量出卷。</div>';
     }
-    h += '</div>';
+    h += '<p class="muted" style="margin-top:10px">本網站模考可暫停。切換到其他頁面或關閉分頁時會保存並暫停；返回後按「繼續」才恢復計時。瀏覽器被強制結束時可能無法保存最後的變更。</p></div>';
     h += '<button class="btn brand block" style="margin-top:16px" data-act="e-start">開始模擬考</button>';
     if (State.examHistory.length) {
       h += '<div class="card"><div class="card-t">歷史成績</div>' +
@@ -580,6 +651,9 @@
   }
   function startExam(mode, queue, minutes, label, src) {
     var e = State.exam;
+    queue = queue.filter(function (id) { return eligible(byId[id]); });
+    if (!queue.length) return;
+    if (e.phase === 'run' && e.queue.length) State.archivedSessions.push({kind:'exam', archivedAt:Date.now(), reason:'開始另一份模考', session:JSON.parse(JSON.stringify(e))});
     e.phase = 'run'; e.mode = mode; e.src = src || null;
     e.queue = queue; e.idx = 0; e.answers = {}; e.flags = {};
     e.timed = minutes > 0;
@@ -594,7 +668,7 @@
   }
   function submitExam(auto) {
     var e = State.exam, ec = examCfg();
-    if (e.phase !== 'run') return;
+    if (e.phase !== 'run' || blockedSession(e)) return;
     stopTimer();
     var right = 0, answered = 0, byCh = {};
     e.queue.forEach(function (id) {
@@ -605,7 +679,7 @@
       var ok = hasAnswer && e.answers[id] === q.ans;
       if (hasAnswer) { answered++; c.answered++; }
       if (ok) { right++; c.right++; }
-      if (hasAnswer) recordAttempt(id, ok, 'exam', e.sessionId);
+      if (hasAnswer) recordAttempt(id, ok, 'exam', e.sessionId, e.answers[id]);
     });
     var p = pct(right, e.queue.length);
     e.result = {
@@ -623,6 +697,7 @@
   }
   function vExamRun() {
     var e = State.exam;
+    if (blockedSession(e)) return blockedSessionHTML('exam');
     var q = byId[e.queue[e.idx]];
     var answered = Object.keys(e.answers).length;
     var h = topbar(e.label || '模擬考', e.paused ? '已暫停' : (e.idx + 1) + ' / ' + e.queue.length, 'e-quit',
@@ -675,6 +750,7 @@
     var resultUnanswered = r.unanswered == null ? Math.max(0, r.count - resultAnswered) : r.unanswered;
     var h = topbar('成績單', e.label, 'e-quit');
     h += '<div class="wrap">';
+    if (blockedSession(e)) h += '<div class="card">歷史成績含已停用題，按當時答案保留，不能代表新版題目掌握度。</div>';
     h += '<div class="card result-hero">' +
       ring(r.pct, 130, r.pass ? 'var(--ok)' : 'var(--bad)', r.pct + '%', r.right + '/' + r.count) +
       '<div class="verdict ' + (r.pass ? 'pass' : 'fail') + '">' + (r.pass ? '合格 ✓' : '未達 ' + ec.passPct + '%') + '</div>' +
@@ -727,10 +803,28 @@
   /* ============================================================
      章节要点
      ============================================================ */
+  function vUpdates() {
+    var excluded = QUESTIONS.filter(function (q) { return !eligible(q); });
+    var h = topbar('修訂與資料來源', '2026-09-14', 'home2') + '<div class="wrap"><div class="card">' +
+      '<p>本次重寫 ' + updatedQuestions().length + ' 題，另有 ' + excluded.filter(function(q) { return q.reviewStatus === 'quarantined'; }).length +
+      ' 道問題題待複核。原題與原有作答保留，但不再進入目前練習與覆蓋率。新版題目使用獨立編號，需重新作答。</p>' +
+      '<p>考試基準為 HKSI Paper 1 第 3.5 版（2026-06-30 起）。本輪核查公開官方規則，未完成全部題目與官方手冊的對照。</p>' +
+      sourceLinks([{title:'HKSI 手冊更新與考試依據', url:'https://www.hksi.org/en/qualification/examinations/licensing-examination-for-securities-and-futures-intermediaries/updating-your-study-guides/'}]) + '</div>';
+    updatedQuestions().forEach(function(q) {
+      h += '<div class="card"><div class="card-t">' + esc(q.id) + ' · 第' + q.ch + '章</div><p>' + esc(q.changeSummary) + '</p>' +
+        sourceLinks(q.sourceRefs) + '<button class="btn" data-act="l-open" data-arg="' + esc(q.id) + '">練習此題</button></div>';
+    });
+    h += '<details class="card"><summary>已停用題目 ' + excluded.length + ' 道</summary>' + excluded.map(function(q) {
+      return '<p>' + esc(q.id) + '：' + esc(q.reviewReason || '規則或選項待核查') + (q.replacedBy ? '；新版 ' + esc(q.replacedBy) : '') + '</p>';
+    }).join('') + '</details></div>' + tabbar();
+    return h;
+  }
   function vNotes() {
     var nv = State.note;
     var h = topbar('章節要點', null, 'home2');
     h += '<div class="wrap">';
+    h += '<div class="card"><p>目前提供發牌與CPT、紀錄保存及投資者賠償的首批要點，並非九章完整筆記。核查日期：2026-09-14。</p>' +
+      '<button class="btn brand" data-act="nav" data-arg="study">速記復習與我的筆記</button></div>';
     if (!NOTES.length) {
       h += '<div class="empty">' + ic('book', 34) + '目前版本尚未提供章節要點</div></div>' + tabbar();
       return h;
@@ -753,7 +847,7 @@
       NOTES.forEach(function (n) {
         (n.keyNumbers || []).forEach(function (k) { kn.push({ ch: n.ch, label: k.label, value: k.value }); });
       });
-      h += '<div class="card"><div class="muted" style="margin-bottom:8px">全部章節的數字類考點（期限 / 百分比 / 金額 / 罰則），考前最後過一遍。</div>' +
+      h += '<div class="card"><div class="muted" style="margin-bottom:8px">本批已核查的數字要點；請連同適用對象、條件及例外閱讀。</div>' +
         '<table class="numtable">' + kn.map(function (k) {
           return '<tr><td><span class="chip brand" style="margin-right:6px">' + k.ch + '</span>' + esc(k.label) + '</td><td>' + esc(k.value) + '</td></tr>';
         }).join('') + '</table></div>';
@@ -788,10 +882,19 @@
         h += '<div class="card"><div class="card-t">' + ic('warn', 17) + '易錯陷阱</div>' +
           note.examTraps.map(function (t) { return '<div class="trap">' + ic('warn', 14) + '<span>' + esc(t) + '</span></div>'; }).join('') + '</div>';
       }
-      h += '<div class="faint" style="text-align:center;margin-top:14px">藍點=課件要點 · 金點=溫習手冊3.5補充 · AI 整理僅供參考</div>';
+      h += '<div class="card"><div class="card-t">官方依據</div>' + sourceLinks(note.sourceRefs) +
+        '<p class="faint">公開官方規則核查 · 非官方教材 · 手冊逐題對照待核</p></div>';
     }
     h += '</div>';
     return h;
+  }
+
+  function vQuestionNote() {
+    var q = byId[State.noteQuestionId], a = State.attempts[State.noteQuestionId];
+    var h = topbar('題目筆記', '查看解析與編輯筆記，不新增作答記錄', 'study-back') + '<div class="wrap">';
+    if (!q) return h + '<div class="empty">這道題目目前無法讀取，已保存的筆記未被刪除。</div></div>';
+    if (!eligible(q)) h += '<div class="card">此題已停用；以下保留舊版題目及解析供整理筆記，不作為現行規則依據。</div>';
+    return h + qCard(q, a && a.selectedOption, true, { lockGraded: true, showExplain: true, answerAct: 'noop' }) + '</div>';
   }
 
   /* ============================================================
@@ -821,7 +924,7 @@
         '<button class="btn block" style="margin-top:12px" data-act="repair-legacy">檢查並修復</button></div>';
     }
     if (!st.wrongBook.length) {
-      h += '<div class="empty">' + ic('check', 34) + '錯題全部清掉了，漂亮</div>';
+      h += '<div class="empty">' + ic('check', 34) + '目前沒有待重做的錯題</div>';
     } else {
       h += '<button class="btn brand block" style="margin-top:14px" data-act="w-redo">重刷全部錯題</button>';
       h += '<div class="card">' + qListRows(st.wrongBook, 'w-remove') + '</div>';
@@ -846,6 +949,7 @@
     var kw = State.search.q.trim().toLowerCase();
     if (kw.length < 2) return [];
     return QUESTIONS.filter(function (q) {
+      if (!eligible(q)) return false;
       var t = (q.q + ' ' + q.A + ' ' + q.B + ' ' + q.C + ' ' + q.D + ' ' + (q.ex || '') + (hasEn(q) ? ' ' + q.en.q : '')).toLowerCase();
       return t.indexOf(kw) >= 0;
     }).slice(0, 60).map(function (q) { return q.id; });
@@ -877,7 +981,8 @@
       el.className = 'clock' + (left < 5 * 60000 ? ' low' : '');
     }
   }
-  function render() {
+  function render(preserveScroll) {
+    var oldScroll = window.scrollY;
     var el = document.getElementById('app');
     document.documentElement.setAttribute('data-theme', State.theme);
     stopTimer();
@@ -888,10 +993,19 @@
     else if (v === 'official') h = vOfficial();
     else if (v === 'notes') h = vNotes();
     else if (v === 'note') h = vNoteDetail();
+    else if (v === 'question-note') h = vQuestionNote();
     else if (v === 'wrong') h = vWrong();
     else if (v === 'favs') h = vFavs();
     else if (v === 'search') h = vSearch();
+    else if (v === 'updates') h = vUpdates();
+    else if (v === 'study' && window.StudyTools) h = topbar('速記與我的筆記', null, 'home2') + '<div class="wrap">' + window.StudyTools.render() + '</div>' + tabbar();
+    else { State.view = 'home'; h = vHome(); }
+    if (storageError) h = '<div class="storage-warning" role="alert">' + esc(storageError) + ' <button class="btn sm" data-act="export-progress">匯出備份</button></div>' + h;
     el.innerHTML = h;
+    if (v === 'question-note') {
+      var noteEditor = document.querySelector('details[data-study-note]');
+      if (noteEditor) noteEditor.open = true;
+    }
     if (State.view === 'exam' && State.exam.phase === 'run' && State.exam.timed && !State.exam.paused) {
       tickExam(); timerId = setInterval(tickExam, 500);
     }
@@ -899,7 +1013,7 @@
       var si = document.getElementById('searchin');
       if (si) { si.focus(); si.setSelectionRange(si.value.length, si.value.length); }
     }
-    window.scrollTo(0, 0);
+    window.scrollTo(0, preserveScroll === true ? oldScroll : 0);
   }
 
   /* ============================================================
@@ -907,13 +1021,17 @@
      ============================================================ */
   function answerPractice(k) {
     var p = State.practice;
-    if (p.graded) return;
+    if (p.graded || blockedSession(p) || !/^[A-D]$/.test(k)) return;
     var q = byId[p.queue[p.idx]];
+    if (!eligible(q)) return;
+    p.answers = p.answers || {};
+    if (owns(p.answers, q.id)) return;
+    p.answers[q.id] = k;
     p.sel = k; p.graded = true;
     p.roundDone++;
     var ok = k === q.ans;
     if (ok) p.roundRight++;
-    recordAttempt(q.id, ok, 'practice');
+    recordAttempt(q.id, ok, 'practice', null, k);
     save(); render();
     var card = document.querySelector('.explain');
     if (card) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -929,11 +1047,20 @@
         if (arg === 'exam' && e.phase === 'result') { /* 保留成绩单 */ }
         State.view = arg; save(); render(); break;
       case 'home2': State.view = 'home'; save(); render(); break;
+      case 'study-back': State.view = 'study'; save(); render(); break;
       case 'theme': State.theme = State.theme === 'dark' ? 'light' : 'dark'; save(); render(); break;
       case 'lang':
         State.lang = State.lang === 'both' ? 'zh' : State.lang === 'zh' ? 'en' : 'both';
         save(); render(); break;
-      case 'fav': toggleArr(State.favorites, arg); save(); render(); break;
+      case 'fav': toggleArr(State.favorites, arg); save(); render(true); break;
+      case 'export-progress': exportProgress(); break;
+      case 'updated-practice': startPractice(updatedQuestions().map(function (q) { return q.id; })); break;
+      case 'archive-session': {
+        var old = arg === 'exam' ? e : p;
+        State.archivedSessions.push({ kind: arg, archivedAt: Date.now(), reason: '題庫修訂', session: JSON.parse(JSON.stringify(old)) });
+        if (arg === 'exam') clearExam(); else { p.phase = 'setup'; p.queue = []; }
+        State.view = arg; save(); render(); break;
+      }
 
       /* 刷题 */
       case 'p-ch':
@@ -950,13 +1077,16 @@
       }
       case 'p-answer': answerPractice(arg); break;
       case 'p-next':
-        p.idx++; p.sel = null; p.graded = false; save(); render(); break;
+        if (!blockedSession(p) && p.idx < p.queue.length) { p.idx++; p.sel = null; p.graded = false; save(); render(); } break;
       case 'p-prev':
         if (p.idx) { p.idx--; p.sel = null; p.graded = false; save(); render(); } break;
-      case 'p-quit': p.phase = 'setup'; p.queue = []; State.view = 'home'; save(); render(); break;
+      case 'p-quit':
+        if (p.idx >= p.queue.length) { p.phase = 'setup'; p.queue = []; }
+        State.view = 'home'; save(); render(); break;
       case 'ch-practice':
+        archivePracticeBeforeReplace(); p.queue = [];
         p.chs = [+arg]; p.srcs = ['bank', 'past2006', 'sample2023']; p.scope = 'all'; p.phase = 'setup';
-        State.view = 'practice'; render(); break;
+        State.view = 'practice'; save(); render(); break;
 
       /* 模拟考 */
       case 'e-mode': e.mode = arg; e.count = arg === 'quick' ? 30 : examCfg().count; render(); break;
@@ -968,7 +1098,7 @@
         var chs = e.mode === 'custom' ? e.chs : [];
         var queue = blueprintSample(cnt, chs);
         var mins = e.mode === 'real' ? ec.minutes : Math.round(queue.length * ec.minutes / ec.count);
-        var label = e.mode === 'real' ? '全真模考' : e.mode === 'quick' ? '快速模考' : '自訂模考';
+        var label = e.mode === 'real' ? '60題模考' : e.mode === 'quick' ? '快速模考' : '自訂模考';
         startExam(e.mode, queue, mins, label);
         break;
       }
@@ -980,11 +1110,10 @@
         break;
       }
       case 'e-answer':
-        if (e.paused) break;
+        if (e.paused || blockedSession(e) || !/^[A-D]$/.test(arg)) break;
         reconcileExamClock();
         if (e.phase !== 'run') break;
         e.answers[byId[e.queue[e.idx]].id] = arg;
-        if (e.idx < e.queue.length - 1) e.idx++;
         save(); render(); break;
       case 'e-prev': if (!e.paused && e.idx) { e.idx--; save(); render(); } break;
       case 'e-next': if (!e.paused && e.idx < e.queue.length - 1) { e.idx++; save(); render(); } break;
@@ -1038,7 +1167,7 @@
       case 'n-sec': {
         var o = State.note.open;
         o[arg] = o[arg] === false ? true : false;
-        render(); break;
+        render(true); break;
       }
 
       /* 列表 */
@@ -1073,7 +1202,7 @@
     }
   });
   document.addEventListener('keydown', function (ev) {
-    if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName)) return;
+    if (ev.target && /INPUT|TEXTAREA|SELECT|BUTTON|SUMMARY/.test(ev.target.tagName)) return;
     var k = ev.key.toUpperCase();
     var map = { '1': 'A', '2': 'B', '3': 'C', '4': 'D' };
     var letter = map[k] || (/^[A-D]$/.test(k) ? k : null);
@@ -1087,10 +1216,18 @@
       else if (ev.key === 'ArrowLeft') handleAct('e-prev');
     }
   });
-  document.addEventListener('visibilitychange', function () { if (!document.hidden) reconcileExamClock(); });
+  document.addEventListener('visibilitychange', function () {
+    if (!byId) return;
+    if (document.hidden && State.exam.phase === 'run' && !blockedSession(State.exam)) { pauseExam(); }
+    else if (!document.hidden) { reconcileExamClock(); if (State.view === 'exam') render(); }
+  });
   window.addEventListener('focus', reconcileExamClock);
   window.addEventListener('pageshow', reconcileExamClock);
-  window.addEventListener('pagehide', save);
+  window.addEventListener('pagehide', function () {
+    if (!byId) return;
+    if (State.exam.phase === 'run' && !blockedSession(State.exam)) pauseExam();
+    else save();
+  });
 
   /* ============================================================
      解锁（加密模式）—— openssl Salted__ 格式，PBKDF2+AES-CBC
@@ -1172,8 +1309,16 @@
   /* ---------- 启动 ---------- */
   function start() {
     initData();
+    var p = State.practice;
+    if (p.phase === 'run' && !p.answers && p.roundDone > 0) p.legacyAnswersIncomplete = true;
+    p.answers = p.answers || {};
+    if (p.phase === 'run' && p.graded && p.sel && p.queue[p.idx]) p.answers[p.queue[p.idx]] = p.sel;
     /* 恢复中断的模考：暂停时不扣时；运行中则按绝对截止时间继续。 */
     var e = State.exam;
+    if (e.phase === 'run' && blockedSession(e)) {
+      e.remainingMs = e.paused ? e.remainingMs : Math.max(0, (e.endAt || 0) - Date.now());
+      e.endAt = 0; e.paused = true;
+    }
     if (e.phase === 'run' && !restoredView) State.view = 'exam';
     if (e.phase === 'run' && e.timed && !e.paused && Date.now() >= e.endAt) submitExam(true);
     else render();

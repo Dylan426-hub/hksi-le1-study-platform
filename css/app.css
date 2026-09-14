@@ -29,6 +29,13 @@ body {
 }
 
 #app { min-height: 100vh; min-height: 100dvh; }
+.update-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.update-card p { color: var(--fg-soft); }
+.card p + p { margin-top: 8px; }
+.card a { color: var(--brand); overflow-wrap: anywhere; }
+.card > .btn { margin-top: 12px; }
+.storage-warning { position: sticky; top: 0; z-index: 100; background: var(--warn-soft); color: var(--fg); padding: 12px; }
+summary { cursor: pointer; }
 
 /* ---------- 布局 ---------- */
 .wrap { max-width: 860px; margin: 0 auto; padding: 0 16px 96px; }
