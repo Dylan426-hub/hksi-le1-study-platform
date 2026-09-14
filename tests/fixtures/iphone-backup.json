@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "exportedAt": "2026-09-14T00:00:00.000Z",
+  "study": {
+    "schemaVersion": 1,
+    "notes": {
+      "b279-r20260914": {
+        "text": "僅供遷移測試：這是模擬筆記，不是題目內容或投資建議。",
+        "reason": "other",
+        "updatedAt": 1789343999000
+      }
+    },
+    "reviews": {}
+  },
+  "progress": {
+    "view": "home",
+    "theme": "light",
+    "lang": "both",
+    "attempts": {
+      "b279-r20260914": {
+        "c": false,
+        "n": 1,
+        "r": 0,
+        "at": 1789343998000,
+        "origin": "practice",
+        "selectedOption": "D",
+        "questionRevision": "synthetic-test",
+        "gradingRevision": "synthetic-test"
+      }
+    },
+    "favorites": ["b279-r20260914"],
+    "wrongRemoved": [],
+    "examHistory": [],
+    "archivedSessions": [],
+    "practice": {
+      "phase": "setup",
+      "chs": [],
+      "srcs": ["bank", "past2006", "sample2023"],
+      "scope": "all",
+      "order": "seq",
+      "queue": [],
+      "idx": 0,
+      "sel": null,
+      "graded": false,
+      "roundRight": 0,
+      "roundDone": 0
+    },
+    "exam": {
+      "phase": "run",
+      "mode": "custom",
+      "chs": [],
+      "count": 1,
+      "minutes": 1,
+      "timed": true,
+      "src": null,
+      "queue": ["b279-r20260914"],
+      "idx": 0,
+      "answers": {"b279-r20260914": "D"},
+      "flags": {},
+      "endAt": 0,
+      "remainingMs": 45000,
+      "paused": true,
+      "gridOpen": false,
+      "result": null,
+      "showAll": false,
+      "sessionId": "synthetic-iphone-migration-test",
+      "label": "僅供遷移測試的模擬會話"
+    },
+    "note": {"ch": 0, "open": {}, "tab": "ch"},
+    "noteQuestionId": null,
+    "search": {"q": ""},
+    "confirmSubmit": false
+  }
+}

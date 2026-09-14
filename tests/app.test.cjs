@@ -6,8 +6,9 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const APP = path.resolve(__dirname, '../js/app.js');
 const STUDY = path.resolve(__dirname, '../js/study.js');
+const MIGRATION = path.resolve(__dirname, '../js/migration.js');
 const source = fs.readFileSync(APP, 'utf8');
-const names = ['State', 'initData', 'load', 'start', 'save', 'eligible', 'updatedQuestions', 'blockedSession', 'stats', 'recordAttempt', 'practicePool', 'startPractice', 'vPracticeRun', 'answerPractice', 'blueprintSample', 'examRemainingMs', 'pauseExam', 'resumeExam', 'startExam', 'submitExam', 'handleAct', 'render', 'qCard', 'searchHits', 'reconcileExamClock'];
+const names = ['State', 'initData', 'load', 'start', 'save', 'eligible', 'updatedQuestions', 'blockedSession', 'stats', 'recordAttempt', 'practicePool', 'startPractice', 'vPracticeRun', 'answerPractice', 'blueprintSample', 'examRemainingMs', 'pauseExam', 'resumeExam', 'startExam', 'submitExam', 'handleAct', 'render', 'qCard', 'searchHits', 'reconcileExamClock', 'prepareAppReload', 'inspectBackup', 'restoreBackup'];
 const sentinel = '  load();\n  if (!localStorage.getItem(KEY)';
 assert(source.includes(sentinel), 'Test injection marker is present');
 const injected = source.replace(sentinel, '  window.__test = {' + names.join(',') + '};\n  return;\n  load();\n  if (!localStorage.getItem(KEY)');
@@ -22,11 +23,11 @@ function harness(saved, useStudy = true, savedStudy) {
   const localStorage = { getItem: k => values.has(k) ? values.get(k) : null, setItem: (k, v) => values.set(k, String(v)), removeItem: k => values.delete(k) };
   const devents = {}, wevents = {}, intervals = new Map(), timeouts = new Map();
   let sequence = 0;
-  let renderedHTML = '', currentNoteEditor = null;
+  let renderedHTML = '', currentNoteEditor = null, installPanelOpen = false;
   const app = { get innerHTML() { return renderedHTML; }, set innerHTML(html) { renderedHTML = html; currentNoteEditor = /<details\b[^>]*\bdata-study-note(?:\s|>)/.test(html) ? { open: false } : null; } }, clock = { textContent: '', className: '' };
   const doc = { hidden: false, title: '', body: { appendChild() {} }, documentElement: { setAttribute() {} },
     addEventListener(type, cb, capture) { (devents[type] ||= []).push({ cb, capture: !!capture }); }, getElementById(id) { return id === 'app' ? app : id === 'clock' ? clock : null; },
-    querySelector(selector) { return selector === 'details[data-study-note]' ? currentNoteEditor : null; }, querySelectorAll() { return []; }, createElement() { return { click() {}, remove() {}, appendChild() {} }; } };
+    querySelector(selector) { return selector === '.install-panel[open]' ? (installPanelOpen ? { open: true } : null) : selector === 'details[data-study-note]' ? currentNoteEditor : null; }, querySelectorAll() { return []; }, createElement() { return { click() {}, remove() {}, appendChild() {} }; } };
   const study = { initCalls: [], noteCalls: [], renders: 0, init(args) { this.initCalls.push(args); }, countDue() { return 0; }, noteHTML(q) { this.noteCalls.push(q.id); return '<aside>SYNTHETIC_NOTE_HOOK</aside>'; }, render() { this.renders++; return '<article>SYNTHETIC_STUDY_RENDER</article>'; } };
   const win = { scrollY: 0, scrollTo() {}, alert() {}, confirm() { return true; }, addEventListener(type, cb) { (wevents[type] ||= []).push(cb); },
     HKSI_QUESTIONS: [question('old', 'retired'), question('quarantine', 'quarantined'), question('new', 'checked-public'), question('active', 'legacy', 2), question('official', 'legacy', 2, 'sample2023')],
@@ -36,10 +37,11 @@ function harness(saved, useStudy = true, savedStudy) {
   if (useStudy && useStudy !== 'actual') win.StudyTools = study;
   const context = vm.createContext({ window: win, document: doc, localStorage, sessionStorage: localStorage, URL, Blob, TextEncoder, TextDecoder, Uint8Array, console, Date: FakeDate, setTimeout: cb => { const id = ++sequence; timeouts.set(id, cb); return id; }, clearTimeout: id => timeouts.delete(id), setInterval: cb => { const id = ++sequence; intervals.set(id, cb); return id; }, clearInterval: id => intervals.delete(id) });
   if (useStudy === 'actual') vm.runInContext(fs.readFileSync(STUDY, 'utf8'), context, { filename: STUDY });
+  vm.runInContext(fs.readFileSync(MIGRATION, 'utf8'), context, { filename: MIGRATION });
   vm.runInContext(injected, context, { filename: APP });
   const api = win.__test;
   api.initData();
-  return { api, state: api.State, window: win, document: doc, app, study, intervals, values, get noteEditor() { return currentNoteEditor; }, advance(ms) { now += ms; }, emitDocument(type, event = {}) { let stopped = false; const ev = { preventDefault() {}, stopPropagation() { stopped = true; }, ...event }; for (const listener of (devents[type] || []).slice().sort((a,b) => Number(b.capture) - Number(a.capture))) { listener.cb(ev); if (stopped) break; } }, emitWindow(type) { (wevents[type] || []).forEach(cb => cb({})); } };
+  return { api, state: api.State, window: win, document: doc, app, study, intervals, values, get noteEditor() { return currentNoteEditor; }, get now() { return now; }, setInstallPanelOpen(value) { installPanelOpen = !!value; }, advance(ms) { now += ms; }, emitDocument(type, event = {}) { let stopped = false; const ev = { preventDefault() {}, stopPropagation() { stopped = true; }, ...event }; for (const listener of (devents[type] || []).slice().sort((a,b) => Number(b.capture) - Number(a.capture))) { listener.cb(ev); if (stopped) break; } }, emitWindow(type) { (wevents[type] || []).forEach(cb => cb({})); } };
 }
 function studyTarget(act, id, tagName = 'BUTTON', value = '') { const attrs = { 'data-study-act': act, 'data-study-id': id }; return { tagName, value, getAttribute: k => attrs[k] || null, hasAttribute: k => Object.hasOwn(attrs,k), parentNode: null }; }
 function appTarget(act, arg, tagName = 'BUTTON') { const attrs = { 'data-act': act, 'data-arg': arg }; return { tagName, getAttribute: k => attrs[k] || null, hasAttribute: k => Object.hasOwn(attrs,k), parentNode: null }; }
@@ -270,6 +272,284 @@ test('chapter note restoration validates number, enum, object and boolean fields
   }
   const h = harness({ note: { ch: 4, tab: 'num', open: JSON.parse('{"0":false,"1":true,"2":"false","3":1,"bad":false,"__proto__":false}') } }); h.api.load();
   assert.deepEqual(plain(h.state.note), { ch: 4, open: { 0: false, 1: true }, tab: 'num' });
+});
+
+// Build backups only through synthetic app/study fixtures. Never read the vault.
+const PROGRESS_KEY = 'hksi-le1-v1', STUDY_KEY = 'hksi-le1-study-v1';
+function syntheticFullBackup(withExam = false) {
+  const donor = harness(undefined, 'actual');
+  donor.api.startPractice(['new', 'active']); donor.api.answerPractice('A');
+  donor.state.favorites = ['new'];
+  donor.emitDocument('input', { target: studyTarget('note-text', 'new', 'TEXTAREA', 'Synthetic migration note') });
+  donor.emitDocument('change', { target: studyTarget('note-reason', 'new', 'SELECT', 'condition') });
+  donor.api.handleAct('nav', 'study');
+  donor.emitDocument('click', { target: studyTarget('reveal', 'card-new') });
+  donor.emitDocument('click', { target: studyTarget('rate-good', 'card-new') });
+  if (withExam) {
+    donor.api.startExam('custom', ['new', 'active'], 1, 'Synthetic migration exam');
+    donor.api.handleAct('e-answer', 'B'); donor.advance(12000); donor.api.pauseExam();
+  }
+  return { schemaVersion: 1, exportedAt: new Date(donor.now).toISOString(),
+    progress: plain(donor.state), study: JSON.parse(donor.values.get(STUDY_KEY)) };
+}
+
+test('public app bridge exposes the tested migration and reload operations', () => {
+  const h = harness();
+  assert.equal(h.window.HKSIApp.isUnlocked(), true);
+  assert.equal(h.window.HKSIApp.prepareReload, h.api.prepareAppReload);
+  assert.equal(h.window.HKSIApp.inspectBackup, h.api.inspectBackup);
+  assert.equal(h.window.HKSIApp.restoreBackup, h.api.restoreBackup);
+});
+
+test('prepareReload pauses and saves a running exam without grading', () => {
+  const h = harness(); h.api.startExam('custom', ['new', 'active'], 1, 'Synthetic reload exam');
+  h.api.handleAct('e-answer', 'B'); h.advance(12000);
+  const attempts = plain(h.state.attempts), history = plain(h.state.examHistory);
+  assert.equal(h.window.HKSIApp.prepareReload(), true);
+  assert.equal(h.state.exam.phase, 'run'); assert.equal(h.state.exam.paused, true);
+  assert.equal(h.state.exam.remainingMs, 48000); assert.equal(h.state.exam.endAt, 0); assert.equal(h.intervals.size, 0);
+  assert.deepEqual(plain(h.state.attempts), attempts); assert.deepEqual(plain(h.state.examHistory), history);
+  const saved = JSON.parse(h.values.get(PROGRESS_KEY));
+  assert.equal(saved.exam.paused, true); assert.equal(saved.exam.remainingMs, 48000);
+  assert.deepEqual(saved.exam.answers, { new: 'B' }); assert.equal(saved.exam.result, null);
+});
+
+test('prepareReload never grades an expired exam and preserves an already paused clock', () => {
+  const h = harness(); h.api.startExam('custom', ['new'], 1, 'Synthetic expired reload');
+  h.api.handleAct('e-answer', 'A'); h.advance(61000);
+  assert.equal(h.window.HKSIApp.prepareReload(), true);
+  assert.equal(h.state.exam.phase, 'run'); assert.equal(h.state.exam.paused, true); assert.equal(h.state.exam.remainingMs, 0);
+  assert.equal(h.state.exam.result, null); assert.equal(h.state.examHistory.length, 0); assert.deepEqual(plain(h.state.attempts), {});
+  const paused = harness(); paused.api.startExam('custom', ['new'], 1, 'Synthetic paused reload');
+  paused.advance(7000); paused.api.pauseExam(); paused.advance(600000);
+  assert.equal(paused.window.HKSIApp.prepareReload(), true); assert.equal(paused.state.exam.remainingMs, 53000);
+});
+
+test('failed persistence makes prepareReload return false while keeping the exam ungraded', () => {
+  const h = harness(); h.api.startExam('custom', ['new'], 1, 'Synthetic failed reload');
+  h.api.handleAct('e-answer', 'A'); h.advance(10000);
+  const before = h.values.get(PROGRESS_KEY);
+  h.window.localStorage.setItem = () => { throw new Error('Synthetic storage quota'); };
+  assert.equal(h.window.HKSIApp.prepareReload(), false, 'Caller must block reload after a failed save');
+  assert.equal(h.values.get(PROGRESS_KEY), before);
+  assert.equal(h.state.exam.phase, 'run'); assert.equal(h.state.exam.paused, true); assert.equal(h.state.exam.remainingMs, 50000);
+  assert.equal(h.intervals.size, 0); assert.equal(h.state.examHistory.length, 0); assert.deepEqual(plain(h.state.attempts), {});
+  h.api.render(); assert(h.app.innerHTML.includes('學習進度未能保存'));
+});
+
+test('actual study saved nonempty notes allow reload without rewriting the notes', () => {
+  const h = harness(undefined, 'actual');
+  h.emitDocument('input', { target: studyTarget('note-text', 'new', 'TEXTAREA', 'Synthetic saved reload note') });
+  const savedNotes = h.values.get(STUDY_KEY);
+  assert.equal(JSON.parse(savedNotes).notes.new.text, 'Synthetic saved reload note');
+  assert.equal(h.window.StudyTools.canMigrateIntoEmpty(), false, 'Nonempty notes still prohibit replacement import');
+  assert.equal(h.window.StudyTools.canReloadSafely(), true);
+  assert.equal(h.window.HKSIApp.prepareReload(), true);
+  assert.equal(h.values.get(STUDY_KEY), savedNotes); assert(h.values.has(PROGRESS_KEY));
+});
+
+test('actual study unsaved notes block reload despite a saved paused exam until note retry succeeds', () => {
+  const h = harness(undefined, 'actual'); h.api.startExam('custom', ['new', 'active'], 1, 'Synthetic dirty-note reload');
+  h.api.handleAct('e-answer', 'B'); h.advance(10000);
+  const setItem = h.window.localStorage.setItem;
+  h.window.localStorage.setItem = (key, value) => {
+    if (key === STUDY_KEY) throw new Error('Synthetic notes-only storage quota');
+    return setItem(key, value);
+  };
+  h.emitDocument('input', { target: studyTarget('note-text', 'new', 'TEXTAREA', 'Synthetic unsaved reload note') });
+  assert.equal(h.window.StudyTools.canReloadSafely(), false); assert.equal(h.values.has(STUDY_KEY), false);
+  assert.equal(h.window.HKSIApp.prepareReload(), false, 'Successful app save cannot discard an unsaved note');
+  const savedExam = JSON.parse(h.values.get(PROGRESS_KEY)).exam;
+  assert.equal(savedExam.phase, 'run'); assert.equal(savedExam.paused, true); assert.equal(savedExam.remainingMs, 50000);
+  assert.equal(savedExam.endAt, 0); assert.deepEqual(savedExam.answers, { new: 'B' }); assert.equal(savedExam.result, null);
+  assert.equal(h.state.exam.paused, true); assert.equal(h.intervals.size, 0);
+  assert.deepEqual(plain(h.state.attempts), {}); assert.equal(h.state.examHistory.length, 0);
+  assert(h.window.StudyTools.noteHTML(h.window.HKSI_QUESTIONS[2]).includes('Synthetic unsaved reload note'));
+  h.window.localStorage.setItem = setItem;
+  h.emitDocument('click', { target: studyTarget('retry-save', 'new') });
+  assert.equal(JSON.parse(h.values.get(STUDY_KEY)).notes.new.text, 'Synthetic unsaved reload note');
+  assert.equal(h.window.StudyTools.canReloadSafely(), true);
+  h.advance(600000); assert.equal(h.window.HKSIApp.prepareReload(), true);
+  assert.equal(h.state.exam.remainingMs, 50000); assert.equal(h.state.exam.phase, 'run'); assert.equal(h.state.exam.paused, true);
+  assert.deepEqual(plain(h.state.attempts), {}); assert.equal(h.state.examHistory.length, 0);
+});
+
+test('inspection is read-only and full import into an empty installation preserves attempts and notes', () => {
+  const backup = syntheticFullBackup(), inputBefore = JSON.stringify(backup);
+  const h = harness(undefined, 'actual'), stateBefore = plain(h.state);
+  const inspected = h.window.HKSIApp.inspectBackup(JSON.stringify(backup));
+  assert.deepEqual(plain(inspected.progress.attempts), backup.progress.attempts);
+  assert.deepEqual(plain(inspected.study), backup.study);
+  assert.equal(h.values.size, 0); assert.deepEqual(plain(h.state), stateBefore);
+  assert.equal(h.window.HKSIApp.restoreBackup(backup), true);
+  assert.equal(JSON.stringify(backup), inputBefore, 'Import must not mutate the source backup');
+  assert.deepEqual(plain(h.state.attempts), backup.progress.attempts);
+  assert.deepEqual(plain(h.state.favorites), backup.progress.favorites);
+  assert.equal(h.state.view, 'home'); assert.equal(h.state.confirmSubmit, false);
+  assert.deepEqual(JSON.parse(h.values.get(STUDY_KEY)), backup.study);
+  assert.deepEqual(JSON.parse(h.values.get(PROGRESS_KEY)).attempts, backup.progress.attempts);
+  const fresh = harness(JSON.parse(h.values.get(PROGRESS_KEY)), 'actual', JSON.parse(h.values.get(STUDY_KEY)));
+  fresh.api.load(); fresh.api.start(); fresh.api.handleAct('nav', 'study');
+  fresh.emitDocument('click', { target: studyTarget('tab-notes') });
+  assert(fresh.app.innerHTML.includes('Synthetic migration note'));
+  assert.deepEqual(plain(fresh.state.attempts), backup.progress.attempts);
+});
+
+test('in-memory learning data refuses import even when persistent progress is empty', () => {
+  const backup = syntheticFullBackup(), h = harness();
+  h.api.recordAttempt('active', false, 'practice', null, 'C');
+  assert.equal(h.values.has(PROGRESS_KEY), false);
+  const before = plain(h.state);
+  assert.throws(() => h.window.HKSIApp.inspectBackup(backup), /已有學習資料/);
+  assert.throws(() => h.window.HKSIApp.restoreBackup(backup), /已有學習資料/);
+  assert.deepEqual(plain(h.state), before); assert.equal(h.values.size, 0);
+});
+
+test('persisted progress or study notes refuse overwrite even before they are loaded into State', () => {
+  const backup = syntheticFullBackup();
+  for (const kind of ['progress', 'study']) {
+    const h = kind === 'progress' ? harness(backup.progress) : harness(undefined, true, backup.study);
+    assert.deepEqual(plain(h.state.attempts), {});
+    const stored = [...h.values.entries()], state = plain(h.state);
+    assert.throws(() => h.window.HKSIApp.restoreBackup(backup), /已有學習資料/);
+    assert.deepEqual([...h.values.entries()], stored); assert.deepEqual(plain(h.state), state);
+  }
+});
+
+test('second-key write failure rolls back both persisted keys and leaves in-memory State unchanged', () => {
+  const backup = syntheticFullBackup(), h = harness(); h.api.save();
+  h.values.set(STUDY_KEY, JSON.stringify({ schemaVersion: 1, notes: {}, reviews: {} }));
+  h.values.set('synthetic-unrelated-key', 'unchanged');
+  const stored = [...h.values.entries()], state = plain(h.state), setItem = h.window.localStorage.setItem;
+  const writes = [];
+  h.window.localStorage.setItem = (key, value) => {
+    writes.push(key); if (writes.length === 2) throw new Error('Synthetic second-key quota failure');
+    return setItem(key, value);
+  };
+  assert.throws(() => h.window.HKSIApp.restoreBackup(backup), /原有資料已還原/);
+  assert.deepEqual(writes.slice(0, 2), [STUDY_KEY, PROGRESS_KEY]);
+  assert.deepEqual([...h.values.entries()], stored); assert.deepEqual(plain(h.state), state);
+});
+
+test('imported paused exam survives pagehide and restart without losing answers or grading', () => {
+  const backup = syntheticFullBackup(true), h = harness(undefined, 'actual');
+  assert.equal(h.window.HKSIApp.restoreBackup(backup), true);
+  const attempts = plain(h.state.attempts), answers = plain(h.state.exam.answers);
+  assert.equal(h.state.exam.paused, true); assert.equal(h.state.exam.remainingMs, 48000); assert.equal(h.state.exam.endAt, 0);
+  h.advance(600000); h.emitWindow('pagehide'); h.emitWindow('pageshow'); h.emitWindow('focus');
+  assert.equal(h.state.exam.phase, 'run'); assert.equal(h.state.exam.paused, true); assert.equal(h.state.exam.remainingMs, 48000);
+  assert.equal(h.state.exam.result, null); assert.equal(h.state.examHistory.length, 0); assert.deepEqual(plain(h.state.attempts), attempts);
+  assert.deepEqual(plain(h.state.exam.answers), answers);
+  const saved = JSON.parse(h.values.get(PROGRESS_KEY));
+  assert.equal(saved.exam.paused, true); assert.equal(saved.exam.remainingMs, 48000); assert.deepEqual(saved.exam.answers, answers);
+  const fresh = harness(saved, 'actual', JSON.parse(h.values.get(STUDY_KEY))); fresh.api.load(); fresh.api.start();
+  assert.equal(fresh.state.exam.paused, true); assert.equal(fresh.state.exam.remainingMs, 48000);
+  assert.deepEqual(plain(fresh.state.exam.answers), answers); assert.deepEqual(plain(fresh.state.attempts), attempts);
+});
+
+test('null practice and exam backup sessions become safe setup states before pagehide or rendering', () => {
+  const backup = syntheticFullBackup(); backup.progress.practice = null; backup.progress.exam = null;
+  const h = harness(undefined, 'actual'); assert.equal(h.window.HKSIApp.restoreBackup(backup), true);
+  assert.equal(h.state.practice.phase, 'setup'); assert.deepEqual(plain(h.state.practice.queue), []);
+  assert.equal(h.state.exam.phase, 'setup'); assert.deepEqual(plain(h.state.exam.queue), []);
+  assert.doesNotThrow(() => { h.api.render(); h.emitWindow('pagehide'); h.emitWindow('pageshow'); });
+  assert.equal(h.window.HKSIApp.prepareReload(), true);
+  assert.deepEqual(JSON.parse(h.values.get(PROGRESS_KEY)).attempts, backup.progress.attempts);
+});
+
+test('empty persisted strings fail closed instead of being treated as a new installation', () => {
+  const backup = syntheticFullBackup();
+  for (const key of [PROGRESS_KEY, STUDY_KEY]) {
+    for (const value of ['', '  ']) {
+      const h = harness(undefined, 'actual'); h.values.set(key, value);
+      const stored = [...h.values.entries()], state = plain(h.state);
+      assert.throws(() => h.window.HKSIApp.inspectBackup(backup));
+      assert.throws(() => h.window.HKSIApp.restoreBackup(backup));
+      assert.deepEqual([...h.values.entries()], stored); assert.deepEqual(plain(h.state), state);
+    }
+  }
+});
+
+test('completed practice setup state keeps residual answers through import, pagehide and reload', () => {
+  const donor = harness(undefined, 'actual'); donor.api.startPractice(['new', 'active']);
+  donor.api.answerPractice('A'); donor.api.handleAct('p-next'); donor.api.answerPractice('B');
+  donor.api.handleAct('p-next'); donor.api.handleAct('p-quit');
+  assert.equal(donor.state.practice.phase, 'setup'); assert.deepEqual(plain(donor.state.practice.queue), []);
+  const practice = plain(donor.state.practice), attempts = plain(donor.state.attempts);
+  assert.deepEqual(practice.answers, { new: 'A', active: 'B' }); assert.equal(practice.roundDone, 2);
+  const backup = { schemaVersion: 1, exportedAt: new Date(donor.now).toISOString(), progress: plain(donor.state), study: null };
+  const h = harness(undefined, 'actual'); assert.equal(h.window.HKSIApp.restoreBackup(backup), true);
+  h.emitWindow('pagehide');
+  const saved = JSON.parse(h.values.get(PROGRESS_KEY));
+  assert.deepEqual(saved.practice, practice); assert.deepEqual(saved.attempts, attempts);
+  const fresh = harness(saved, 'actual'); fresh.api.load(); fresh.api.start(); fresh.emitWindow('pagehide');
+  assert.deepEqual(plain(fresh.state.practice), practice); assert.deepEqual(plain(fresh.state.attempts), attempts);
+  assert.deepEqual(JSON.parse(fresh.values.get(PROGRESS_KEY)).practice, practice);
+});
+
+test('an empty saved and reloaded installation remains eligible for migration', () => {
+  const h = harness(undefined, 'actual'); h.api.save();
+  const fresh = harness(JSON.parse(h.values.get(PROGRESS_KEY)), 'actual'); fresh.api.load(); fresh.api.start();
+  assert.equal(fresh.state.exam.phase, 'setup'); assert.equal(fresh.state.exam.sessionId, null);
+  assert.equal(fresh.window.StudyTools.canMigrateIntoEmpty(), true);
+  assert.doesNotThrow(() => fresh.window.HKSIApp.inspectBackup(syntheticFullBackup()));
+});
+
+test('actual study dirty notes block migration even when no note was successfully persisted', () => {
+  const h = harness(undefined, 'actual'), backup = syntheticFullBackup();
+  assert.equal(h.window.StudyTools.canMigrateIntoEmpty(), true);
+  const setItem = h.window.localStorage.setItem;
+  h.window.localStorage.setItem = (key, value) => {
+    if (key === STUDY_KEY) throw new Error('Synthetic note quota');
+    return setItem(key, value);
+  };
+  h.emitDocument('input', { target: studyTarget('note-text', 'new', 'TEXTAREA', 'Synthetic unsaved note') });
+  assert.equal(h.values.has(STUDY_KEY), false); assert.deepEqual(plain(h.state.attempts), {});
+  const noteBefore = h.window.StudyTools.noteHTML(h.window.HKSI_QUESTIONS[2]), state = plain(h.state);
+  assert(noteBefore.includes('Synthetic unsaved note')); assert(noteBefore.includes('尚未寫入本機'));
+  assert.equal(h.window.StudyTools.canMigrateIntoEmpty(), false);
+  assert.throws(() => h.window.HKSIApp.restoreBackup(backup), /已有筆記、速記進度或未保存內容/);
+  assert.equal(h.values.size, 0); assert.deepEqual(plain(h.state), state);
+  assert.equal(h.window.StudyTools.noteHTML(h.window.HKSI_QUESTIONS[2]), noteBefore, 'Read-only import guard cannot change unsaved notes');
+});
+
+test('actual study read-blocked state refuses migration even after the raw stored value is replaced', () => {
+  const h = harness(undefined, 'actual', { invalidSyntheticStudy: true });
+  h.values.set(STUDY_KEY, JSON.stringify({ schemaVersion: 1, notes: {}, reviews: {} }));
+  const stored = [...h.values.entries()], state = plain(h.state);
+  assert.equal(h.window.StudyTools.canMigrateIntoEmpty(), false);
+  assert.throws(() => h.window.HKSIApp.inspectBackup(syntheticFullBackup()), /已有筆記、速記進度或未保存內容/);
+  assert.deepEqual([...h.values.entries()], stored); assert.deepEqual(plain(h.state), state);
+  assert(h.window.StudyTools.noteHTML(h.window.HKSI_QUESTIONS[2]).includes('本機儲存不可用'));
+});
+
+test('actual study in-memory notes and reviews each block migration after their persistent key disappears', () => {
+  const backup = syntheticFullBackup();
+  for (const kind of ['notes', 'reviews']) {
+    const existingStudy = { schemaVersion: 1, notes: kind === 'notes' ? backup.study.notes : {},
+      reviews: kind === 'reviews' ? backup.study.reviews : {} };
+    const h = harness(undefined, 'actual', existingStudy); h.values.delete(STUDY_KEY);
+    assert.deepEqual(plain(h.state.attempts), {}); assert.equal(h.window.StudyTools.canMigrateIntoEmpty(), false);
+    const state = plain(h.state), countDue = h.window.StudyTools.countDue();
+    assert.throws(() => h.window.HKSIApp.restoreBackup(backup), /已有筆記、速記進度或未保存內容/);
+    assert.equal(h.values.size, 0); assert.deepEqual(plain(h.state), state); assert.equal(h.window.StudyTools.countDue(), countDue);
+  }
+});
+
+test('installation modal keyboard events cannot answer, advance or score an underlying session', () => {
+  for (const kind of ['practice', 'exam']) {
+    const h = harness();
+    if (kind === 'practice') h.api.startPractice(['new', 'active']);
+    else h.api.startExam('custom', ['new', 'active'], 1, 'Synthetic modal exam');
+    h.setInstallPanelOpen(true); const before = plain(h.state);
+    for (const key of ['A', '1', 'Enter', 'ArrowRight', 'ArrowLeft']) {
+      h.emitDocument('keydown', { target: { tagName: 'DIV', parentNode: null }, key });
+    }
+    assert.deepEqual(plain(h.state), before); assert.deepEqual(plain(h.state.attempts), {});
+    h.setInstallPanelOpen(false); h.emitDocument('keydown', { target: { tagName: 'DIV', parentNode: null }, key: 'A' });
+    if (kind === 'practice') assert.equal(h.state.attempts.new.n, 1);
+    else { assert.equal(h.state.exam.answers.new, 'A'); assert.deepEqual(plain(h.state.attempts), {}); }
+  }
 });
 let passed = 0, failed = 0;
 console.log('SOURCE_SHA256 ' + crypto.createHash('sha256').update(source).digest('hex'));

@@ -98,8 +98,8 @@
           });
         }
       }
-      if (o.practice && o.practice.phase === 'run' && o.practice.queue.length) State.practice = o.practice;
-      if (o.exam && (o.exam.phase === 'run' || o.exam.phase === 'result')) {
+      if (o.practice && Array.isArray(o.practice.queue) && (o.practice.phase === 'setup' || (o.practice.phase === 'run' && o.practice.queue.length))) State.practice = o.practice;
+      if (o.exam && (o.exam.phase === 'setup' || o.exam.phase === 'run' || o.exam.phase === 'result')) {
         State.exam = o.exam;
         State.exam.answers = State.exam.answers || {};
         State.exam.flags = State.exam.flags || {};
@@ -107,7 +107,7 @@
         if (typeof State.exam.remainingMs !== 'number') {
           State.exam.remainingMs = State.exam.timed ? Math.max(0, (State.exam.endAt || 0) - Date.now()) : 0;
         }
-        if (!State.exam.sessionId) State.exam.sessionId = 'legacy-' + (State.exam.endAt || Date.now());
+        if (State.exam.phase !== 'setup' && !State.exam.sessionId) State.exam.sessionId = 'legacy-' + (State.exam.endAt || Date.now());
       }
     } catch (e) { /* 忽略损坏的本地存储 */ }
   }
@@ -117,8 +117,8 @@
         view: State.view, note: State.note, noteQuestionId: State.noteQuestionId,
         attempts: State.attempts, favorites: State.favorites, wrongRemoved: State.wrongRemoved,
         examHistory: State.examHistory, archivedSessions: State.archivedSessions, theme: State.theme, lang: State.lang,
-        practice: State.practice.phase === 'run' ? State.practice : null,
-        exam: (State.exam.phase === 'run' || State.exam.phase === 'result') ? State.exam : null
+        practice: State.practice,
+        exam: State.exam
       }));
       storageError = '';
       return true;
@@ -133,6 +133,51 @@
     var url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     var a = document.createElement('a'); a.href = url; a.download = 'hksi-learning-backup-' + Date.now() + '.json';
     document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    return true;
+  }
+  function prepareAppReload() {
+    var e = State.exam;
+    if (e.phase === 'run') {
+      e.remainingMs = e.paused ? e.remainingMs : Math.max(0, (e.endAt || 0) - Date.now());
+      e.paused = true; e.endAt = 0; stopTimer();
+    }
+    var progressSaved = save();
+    return progressSaved && (!window.StudyTools || !window.StudyTools.canReloadSafely || window.StudyTools.canReloadSafely());
+  }
+  function inspectBackup(input) {
+    if (!byId || !window.HKSIMigration) throw new Error('請先輸入口令，再遷入備份。');
+    var rawProgress = localStorage.getItem(KEY), rawStudy = localStorage.getItem('hksi-le1-study-v1');
+    var storedProgress = rawProgress !== null ? JSON.parse(rawProgress) : null;
+    var storedStudy = rawStudy !== null ? JSON.parse(rawStudy) : null;
+    if (window.StudyTools && window.StudyTools.canMigrateIntoEmpty && !window.StudyTools.canMigrateIntoEmpty()) {
+      throw new Error('已有筆記、速記進度或未保存內容，不能整批覆蓋。請先保留現有資料。');
+    }
+    if (window.HKSIMigration.hasUserData(State, storedStudy) || window.HKSIMigration.hasUserData(storedProgress, storedStudy)) {
+      throw new Error('這個安裝已有學習資料，不能整批覆蓋。請保留現有資料；筆記可用「我的筆記」中的合併匯入。');
+    }
+    return window.HKSIMigration.validate(input, QUESTIONS.map(function (q) { return q.id; }),
+      (window.HKSI_CARDS || []).map(function (c) { return c.id; }));
+  }
+  function restoreBackup(input) {
+    var incoming = inspectBackup(input), oldProgress = localStorage.getItem(KEY), oldStudy = localStorage.getItem('hksi-le1-study-v1');
+    var next = incoming.progress;
+    next.practice = next.practice || JSON.parse(JSON.stringify(State.practice));
+    next.exam = next.exam || JSON.parse(JSON.stringify(State.exam));
+    next.view = 'home'; next.confirmSubmit = false;
+    try {
+      if (incoming.study) localStorage.setItem('hksi-le1-study-v1', JSON.stringify(incoming.study));
+      else localStorage.removeItem('hksi-le1-study-v1');
+      localStorage.setItem(KEY, JSON.stringify(next));
+    } catch (err) {
+      try {
+        if (oldStudy === null) localStorage.removeItem('hksi-le1-study-v1'); else localStorage.setItem('hksi-le1-study-v1', oldStudy);
+        if (oldProgress === null) localStorage.removeItem(KEY); else localStorage.setItem(KEY, oldProgress);
+      } catch (rollbackError) { throw new Error('儲存失敗，部分空白設定未能還原。請保留原始備份，勿開始作答，重新開啟後再檢查。'); }
+      throw new Error('儲存空間不足或被限制，未完成遷入。原有資料已還原。');
+    }
+    Object.keys(next).forEach(function (key) { State[key] = next[key]; });
+    stopTimer();
+    return true;
   }
   function sourceLinks(refs) {
     return (refs || []).map(function (s) {
@@ -332,7 +377,7 @@
     var noteCount = NOTES.length;
     var repair = legacyPollutionCandidate();
     var h = topbar(BRAND.homeTitle, BRAND.homeSub, null,
-      '<button class="iconbtn" data-act="nav" data-arg="search">' + ic('search', 18) + '</button>');
+      '<button class="iconbtn" aria-label="搜尋題目" data-act="nav" data-arg="search">' + ic('search', 18) + '</button>');
     h += '<div class="wrap">';
     h += '<div class="hero">' +
       ring(st.donePct, 96, '#fff', st.donePct + '%', '已刷', true) +
@@ -347,7 +392,7 @@
     h += '<div class="navgrid">' + [
       ['practice', 'bolt', '刷題', st.total + ' 題', 0],
       ['exam', 'clock', '模擬考', ec.count + '題 / ' + ec.minutes + '分鐘', 0],
-      ['official', 'doc', '官方卷', officialCount ? officialCount + ' 題' : '暫未提供', 0],
+      [officialCount ? 'official' : 'study', officialCount ? 'doc' : 'layers', officialCount ? '官方卷' : '速記與筆記', officialCount ? officialCount + ' 題' : '待複習 ' + (window.StudyTools ? window.StudyTools.countDue() : 0), 0],
       ['notes', 'book', '章節要點', noteCount ? noteCount + ' 章' : '暫未提供', 0],
       ['wrong', 'x', '錯題本', '待清 ' + st.wrongBook.length, st.wrongBook.length],
       ['favs', 'star', '收藏', st.favs.length + ' 題', 0]
@@ -355,6 +400,8 @@
       return '<button class="navitem" data-act="nav" data-arg="' + n[0] + '">' + ic(n[1], 22) +
         '<div class="nt">' + n[2] + '</div><div class="ns">' + n[3] + '</div></button>';
     }).join('') + '</div>';
+
+    h += '<button class="app-entry" type="button" data-pwa-open><span class="app-entry-copy"><strong>iPhone 安裝、離線與備份</strong><span>加入主屏幕 · 檢查離線資料 · 遷入學習記錄</span></span>' + ic('chev', 18) + '</button>';
 
     h += '<div class="card update-card"><div class="card-t">2026-09-14 題庫與復習更新</div>' +
       '<p>' + updatedQuestions().length + ' 道題已按公開官方規則重寫；其餘舊題未完成逐題核驗。已停用題不再抽入練習，原有作答紀錄仍保留。</p>' +
@@ -434,7 +481,7 @@
       (hasEn(q) ? '<button class="chip brand" data-act="lang" style="border:0;cursor:pointer;font-family:inherit">' +
         (State.lang === 'zh' ? '中' : State.lang === 'en' ? 'EN' : '中+EN') + '</button>' : '') +
       '<span style="flex:1"></span>' +
-      '<button class="iconbtn' + (fav ? ' on' : '') + '" style="width:32px;height:32px" data-act="fav" data-arg="' + q.id + '">' + ic('star', 16) + '</button>' +
+      '<button class="iconbtn' + (fav ? ' on' : '') + '" aria-label="' + (fav ? '取消收藏此題' : '收藏此題') + '" aria-pressed="' + fav + '" style="width:32px;height:32px" data-act="fav" data-arg="' + q.id + '">' + ic('star', 16) + '</button>' +
       '</div>';
     h += '<div class="qstem">' + stemHTML(q) + '</div>';
     h += '<div class="opts">' + ['A', 'B', 'C', 'D'].map(function (k) {
@@ -1212,6 +1259,7 @@
     }
   });
   document.addEventListener('keydown', function (ev) {
+    if (document.querySelector('.install-panel[open]')) return;
     if (ev.target && /INPUT|TEXTAREA|SELECT|BUTTON|SUMMARY/.test(ev.target.tagName)) return;
     var k = ev.key.toUpperCase();
     var map = { '1': 'A', '2': 'B', '3': 'C', '4': 'D' };
@@ -1277,16 +1325,17 @@
   function lockHTML() {
     return '<div class="lock"><div class="lock-card">' +
       '<div class="lock-badge">' + ic('target', 26) + '</div>' +
-      '<div class="lock-t">学习平台</div>' +
-      '<div class="lock-s">刷题 · 模拟考 · 要点速记</div>' +
+      '<div class="lock-t">HKSI LE 試卷一</div>' +
+      '<div class="lock-s">刷題 · 模考 · 筆記與速記</div>' +
       (Lock.noCrypto
-        ? '<div class="lock-err">当前环境不支持解密。<br>请用 https 链接打开（本地直接双击 HTML 文件不行）。</div>'
+        ? '<div class="lock-err">此環境不支援解密。<br>請用 HTTPS 網址開啟，不能直接開啟本機 HTML 檔案。</div>'
         : '<form id="lockform" autocomplete="on">' +
-        '<input id="pw" type="password" placeholder="请输入口令" autocomplete="current-password" ' + (Lock.busy ? 'disabled' : '') + '>' +
+        '<input id="pw" name="password" type="password" aria-label="網站口令" placeholder="輸入網站口令" autocomplete="current-password" autocapitalize="none" spellcheck="false" ' + (Lock.busy ? 'disabled' : '') + '>' +
         (Lock.err ? '<div class="lock-err">' + esc(Lock.err) + '</div>' : '') +
         '<button class="btn brand block" type="submit" style="margin-top:12px" ' + (Lock.busy ? 'disabled' : '') + '>' +
-        (Lock.busy ? '解锁中…' : '进入') + '</button></form>') +
-      '<div class="lock-f">非官方学习工具 · 请尊重资料版权</div>' +
+        (Lock.busy ? '正在驗證口令…' : '進入') + '</button></form>') +
+      '<button class="btn block app-utility" type="button" data-pwa-open>iPhone 安裝與離線設定</button>' +
+      '<div class="lock-f">非官方學習工具 · 請尊重資料版權</div>' +
       '</div></div>';
   }
   function renderLock() {
@@ -1304,13 +1353,13 @@
     }
   }
   function tryUnlock(pw) {
-    if (!pw) { Lock.err = '请输入口令'; renderLock(); return; }
+    if (!pw) { Lock.err = '請輸入網站口令'; renderLock(); return; }
     Lock.busy = true; Lock.err = ''; renderLock();
     unlock(pw).then(function () {
       try { sessionStorage.setItem(PASS_KEY, pw); } catch (e) { }
       start();
     }).catch(function () {
-      Lock.busy = false; Lock.err = '口令不对，再试一次';
+      Lock.busy = false; Lock.err = '口令不正確，請再試一次。';
       try { sessionStorage.removeItem(PASS_KEY); } catch (e) { }
       renderLock();
     });
@@ -1333,6 +1382,10 @@
     if (e.phase === 'run' && e.timed && !e.paused && Date.now() >= e.endAt) submitExam(true);
     else render();
   }
+  window.HKSIApp = {
+    isUnlocked: function () { return !!byId; }, prepareReload: prepareAppReload,
+    exportBackup: exportProgress, inspectBackup: inspectBackup, restoreBackup: restoreBackup
+  };
   load();
   if (!localStorage.getItem(KEY) && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
     State.theme = 'dark';

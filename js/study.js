@@ -463,5 +463,10 @@
     }, true);
   }
 
-  window.StudyTools = { init: init, noteHTML: noteHTML, render: render, countDue: countDue };
+  window.StudyTools = { init: init, noteHTML: noteHTML, render: render, countDue: countDue,
+    canReloadSafely: function () { return !dirty; },
+    canMigrateIntoEmpty: function () {
+      return loaded && !dirty && !readBlocked && !Object.keys(data.notes).length && !Object.keys(data.reviews).length;
+    }
+  };
 }());
